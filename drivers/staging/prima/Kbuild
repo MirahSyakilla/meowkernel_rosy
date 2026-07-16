@@ -9,7 +9,7 @@ endif
 ifeq ($(KERNEL_BUILD),1)
 	# These are provided in Android-based builds
 	# Need to explicitly define for Kernel-based builds
-	MODNAME := wlan
+	PRIMA_MODNAME := wlan
 	WLAN_ROOT := drivers/staging/prima
 endif
 
@@ -784,6 +784,12 @@ endif
 KBUILD_CPPFLAGS += $(CDEFINES)
 
 # Module information used by KBuild framework
+ifeq ($(KERNEL_BUILD),1)
+obj-$(CONFIG_PRIMA_WLAN) += $(PRIMA_MODNAME).o
+obj-$(CONFIG_PRONTO_WLAN) += $(PRIMA_MODNAME).o
+$(PRIMA_MODNAME)-y := $(OBJS)
+else
 obj-$(CONFIG_PRIMA_WLAN) += $(MODNAME).o
 obj-$(CONFIG_PRONTO_WLAN) += $(MODNAME).o
 $(MODNAME)-y := $(OBJS)
+endif
