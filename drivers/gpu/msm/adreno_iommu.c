@@ -400,6 +400,57 @@ static unsigned int __add_curr_ctxt_cmds(struct adreno_ringbuffer *rb,
 	return cmds - cmds_orig;
 }
 
+static int _adreno_iommu_set_pt_gpu(struct adreno_ringbuffer *rb,
+			struct kgsl_pagetable *new_pt)
+{
+	struct adreno_device *adreno_dev = ADRENO_RB_DEVICE(rb);
+	unsigned int *link, *cmds;
+	int result;
+
+	link = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (link == NULL)
+		return -ENOMEM;
+
+	/*
+	 * Match the older A5xx KGSL flow used by rosy's 4.9 kernel: submit the
+	 * pagetable switch as its own protected internal command and leave the
+	 * current-context memstore update to a separate command below.
+	 */
+	if (test_bit(ADRENO_DEVICE_FAULT, &adreno_dev->priv)) {
+		kfree(link);
+		return 0;
+	}
+
+	cmds = link;
+	cmds += adreno_iommu_set_pt_generate_cmds(rb, cmds, new_pt);
+
+	if (WARN_ON((unsigned int)(cmds - link) >
+				(PAGE_SIZE / sizeof(unsigned int)))) {
+		kfree(link);
+		return -ENOSPC;
+	}
+
+	result = adreno_ringbuffer_issue_internal_cmds(rb, KGSL_CMD_FLAGS_PMODE,
+			link, (unsigned int)(cmds - link));
+
+	kfree(link);
+	return result;
+}
+
+static int _adreno_iommu_set_ctxt_gpu(struct adreno_ringbuffer *rb,
+			struct adreno_context *drawctxt)
+{
+	unsigned int link[32], *cmds = link;
+
+	cmds += __add_curr_ctxt_cmds(rb, cmds, drawctxt);
+
+	if (WARN_ON((unsigned int)(cmds - link) > ARRAY_SIZE(link)))
+		return -ENOSPC;
+
+	return adreno_ringbuffer_issue_internal_cmds(rb, KGSL_CMD_FLAGS_NONE,
+			link, (unsigned int)(cmds - link));
+}
+
 /**
  * adreno_iommu_init() - Adreno iommu init
  * @adreno_dev: Adreno device
@@ -442,35 +493,22 @@ int adreno_iommu_set_pt_ctx(struct adreno_ringbuffer *rb,
 	struct adreno_device *adreno_dev = ADRENO_RB_DEVICE(rb);
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	struct kgsl_pagetable *cur_pt = device->mmu.defaultpagetable;
-	unsigned int *cmds = NULL, count = 0;
 	int result = 0;
-
-	cmds = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	if (cmds == NULL)
-		return -ENOMEM;
 
 	/* Switch the page table if a MMU is attached */
 	if (kgsl_mmu_get_mmutype(device) != KGSL_MMU_TYPE_NONE) {
 		if (rb->drawctxt_active)
 			cur_pt = rb->drawctxt_active->base.proc_priv->pagetable;
 
-		/* Add commands for pagetable switch */
+		/* Submit pagetable switch separately, like the 4.9 A5xx path. */
 		if (new_pt != cur_pt)
-			count += adreno_iommu_set_pt_generate_cmds(rb,
-					cmds, new_pt);
-
+			result = _adreno_iommu_set_pt_gpu(rb, new_pt);
 	}
 
-	/* Add commands to set the current context in memstore */
-	count += __add_curr_ctxt_cmds(rb, cmds + count, drawctxt);
+	if (result)
+		return result;
 
-	WARN(count > (PAGE_SIZE / sizeof(unsigned int)),
-			"Temp command buffer overflow\n");
-
-	result = adreno_ringbuffer_issue_internal_cmds(rb, KGSL_CMD_FLAGS_PMODE,
-			cmds, count);
-
-	kfree(cmds);
-	return result;
+	/* Submit current-context memstore/UCHE update as a normal command. */
+	return _adreno_iommu_set_ctxt_gpu(rb, drawctxt);
 
 }
