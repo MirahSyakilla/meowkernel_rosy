@@ -4083,13 +4083,12 @@ csrIsPMFCapabilitiesInRSNMatch( tHalHandle hHal,
            "AP needs PMF connection and we are not capable of pmf connection");
            return VOS_FALSE;
        }
-       else if (!(*pFilterMFPEnabled) && *pFilterMFPCapable &&
-                (apProfileMFPCapable == 1))
-       {
-           VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
-           "we don't need PMF connection eventhough both parties are capable");
-           return VOS_FALSE;
-       }
+	else if (!*pFilterMFPEnabled && *pFilterMFPCapable &&
+		 apProfileMFPCapable && apProfileMFPRequired) {
+		VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_INFO,
+			  "AP requires PMF but PMF is not enabled");
+		return VOS_FALSE;
+	}
     }
     return VOS_TRUE;
 }
