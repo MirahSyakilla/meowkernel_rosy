@@ -116,6 +116,36 @@ void kgsl_print_global_pt_entries(struct seq_file *s)
 	}
 }
 
+static void kgsl_iommu_log_global_fault(struct kgsl_device *device,
+		uint64_t addr)
+{
+	int i;
+
+	for (i = 0; i < global_pt_count; i++) {
+		struct kgsl_memdesc *memdesc = global_pt_entries[i].memdesc;
+		uint64_t start, end;
+
+		if (memdesc == NULL)
+			continue;
+
+		start = memdesc->gpuaddr;
+		end = start + kgsl_memdesc_footprint(memdesc);
+
+		if (addr >= start && addr < end) {
+			dev_crit(device->dev,
+				"KGSL global fault: %s gpuaddr=0x%llx size=%llu flags=0x%llx priv=0x%x offset=0x%llx\n",
+				global_pt_entries[i].name, start,
+				memdesc->size, memdesc->flags, memdesc->priv,
+				addr - start);
+			return;
+		}
+	}
+
+	dev_crit(device->dev,
+		"KGSL global fault: addr=0x%llx is not in a named global entry\n",
+		addr);
+}
+
 static void kgsl_iommu_unmap_globals(struct kgsl_pagetable *pagetable)
 {
 	unsigned int i;
@@ -833,6 +863,9 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 			"context=%s TTBR0=0x%llx CIDR=0x%x (%s %s fault)\n",
 			ctx->name, ptbase, contextidr,
 			write ? "write" : "read", fault_type);
+
+		if (ADDR_IN_GLOBAL(mmu, addr))
+			kgsl_iommu_log_global_fault(ctx->kgsldev, addr);
 
 		if (gpudev->iommu_fault_block) {
 			unsigned int fsynr1;
