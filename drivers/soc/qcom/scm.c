@@ -320,18 +320,29 @@ static int allocate_extra_arg_buffer(struct scm_desc *desc, gfp_t flags)
 	int arglen = desc->arginfo & 0xf;
 	struct qtee_shm shm;
 	size_t argbuflen = PAGE_ALIGN(sizeof(struct scm_extra_arg));
+	bool use_shmbridge = qtee_shmbridge_is_enabled();
 
 	desc->x5 = desc->args[FIRST_EXT_ARG_IDX];
 
 	if (likely(arglen <= N_REGISTER_ARGS))
 		return 0;
 
-	rc = qtee_shmbridge_allocate_shm(argbuflen, &shm);
-	if (rc)
-		return rc;
+	if (use_shmbridge) {
+		rc = qtee_shmbridge_allocate_shm(argbuflen, &shm);
+		if (rc)
+			return rc;
 
-	desc->shm = shm;
-	argbuf = shm.vaddr;
+		desc->shm = shm;
+		argbuf = shm.vaddr;
+	} else {
+		/* Older secure worlds accept ordinary contiguous SCM buffers. */
+		argbuf = kzalloc(argbuflen, flags);
+		if (!argbuf)
+			return -ENOMEM;
+		desc->shm.vaddr = argbuf;
+		desc->shm.paddr = virt_to_phys(argbuf);
+		desc->shm.size = argbuflen;
+	}
 
 	j = FIRST_EXT_ARG_IDX;
 	if (scm_version == SCM_ARMV8_64)
@@ -341,9 +352,9 @@ static int allocate_extra_arg_buffer(struct scm_desc *desc, gfp_t flags)
 		for (i = 0; i < N_EXT_SCM_ARGS; i++)
 			argbuf->args32[i] = desc->args[j++];
 
-	desc->x5 = shm.paddr;
+	desc->x5 = desc->shm.paddr;
 	__cpuc_flush_dcache_area(argbuf, argbuflen);
-	outer_flush_range(shm.paddr, shm.paddr + argbuflen);
+	outer_flush_range(desc->x5, desc->x5 + argbuflen);
 
 	return 0;
 }
@@ -402,9 +413,12 @@ out:
 	if (ret < 0)
 		pr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\n",
 			x0, ret, desc->ret[0], desc->ret[1], desc->ret[2]);
-
-	if (arglen > N_REGISTER_ARGS)
-		qtee_shmbridge_free_shm(&desc->shm);
+	if (arglen > N_REGISTER_ARGS) {
+		if (qtee_shmbridge_is_enabled())
+			qtee_shmbridge_free_shm(&desc->shm);
+		else
+			kfree(desc->shm.vaddr);
+	}
 	if (ret < 0)
 		return scm_remap_error(ret);
 	return 0;
@@ -489,8 +503,12 @@ int scm_call2_atomic(u32 fn_id, struct scm_desc *desc)
 			x0, ret, desc->ret[0],
 			desc->ret[1], desc->ret[2]);
 
-	if (arglen > N_REGISTER_ARGS)
-		qtee_shmbridge_free_shm(&desc->shm);
+	if (arglen > N_REGISTER_ARGS) {
+		if (qtee_shmbridge_is_enabled())
+			qtee_shmbridge_free_shm(&desc->shm);
+		else
+			kfree(desc->shm.vaddr);
+	}
 	if (ret < 0)
 		return scm_remap_error(ret);
 	return ret;
