@@ -1,3 +1,15 @@
+/ {
+	reserved-memory {
+		ramoops_mem: ramoops@91400000 {
+			compatible = "ramoops";
+			reg = <0 0x91400000 0 0x00400000>;
+			record-size = <0x80000>;
+			pmsg-size = <0x200000>;
+			console-size = <0x100000>;
+		};
+	};
+};
+
 &soc {
 	gpio_keys {
 		compatible = "gpio-keys";
