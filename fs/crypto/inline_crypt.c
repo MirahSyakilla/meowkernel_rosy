@@ -101,9 +101,14 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci,
 	const struct inode *inode = ci->ci_inode;
 	struct super_block *sb = inode->i_sb;
 	enum blk_crypto_mode_num crypto_mode = ci->ci_mode->blk_crypto_mode;
+	bool legacy_private = fscrypt_policy_contents_mode(&ci->ci_policy) ==
+							FSCRYPT_MODE_PRIVATE;
+	bool inlinecrypt_enabled;
 	unsigned int dun_bytes;
+	char *storage_type = "ufs";
 	struct request_queue **devs;
 	int num_devs;
+	int err = 0;
 	int i;
 
 	/* The file must need contents encryption, not filenames encryption */
@@ -114,10 +119,26 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci,
 	if (crypto_mode == BLK_ENCRYPTION_MODE_INVALID)
 		return 0;
 
+	if (legacy_private)
+		fscrypt_find_storage_type(&storage_type);
+
 	/* The filesystem must be mounted with -o inlinecrypt */
-	if (!sb->s_cop->inline_crypt_enabled ||
-	    !sb->s_cop->inline_crypt_enabled(sb))
-		return 0;
+	inlinecrypt_enabled = sb->s_cop->inline_crypt_enabled &&
+			      sb->s_cop->inline_crypt_enabled(sb);
+	if (!inlinecrypt_enabled) {
+		if (!legacy_private || strcmp(storage_type, SDHCI))
+			return 0;
+
+		/*
+		 * Qualcomm legacy private-mode data is not decryptable by
+		 * fs-layer xts(aes): the request DUN and keyslot programming
+		 * must reach ICE.  Some preserved Rosy userspace paths fail to
+		 * propagate -o inlinecrypt onto ext4 even though fstab requests
+		 * it, so allow the legacy SDHCI private-mode path to proceed to
+		 * the real hardware capability checks instead of silently
+		 * selecting software crypto.
+		 */
+	}
 
 	/*
 	 * When a page contains multiple logically contiguous filesystem blocks,
@@ -129,8 +150,15 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci,
 	 */
 	if ((fscrypt_policy_flags(&ci->ci_policy) &
 	     FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32) &&
-	    sb->s_blocksize != PAGE_SIZE)
+	    sb->s_blocksize != PAGE_SIZE) {
+		if (legacy_private) {
+			fscrypt_err(inode,
+				    "legacy private mode cannot use IV_INO_LBLK_32 with blocksize %lu",
+				    sb->s_blocksize);
+			return -EOPNOTSUPP;
+		}
 		return 0;
+	}
 
 	/*
 	 * The needed encryption settings must be supported either by
@@ -138,6 +166,7 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci,
 	 */
 
 	if (IS_ENABLED(CONFIG_BLK_INLINE_ENCRYPTION_FALLBACK) &&
+	    !legacy_private &&
 	    !is_hw_wrapped_key) {
 		ci->ci_inlinecrypt = true;
 		return 0;
@@ -153,18 +182,27 @@ int fscrypt_select_encryption_impl(struct fscrypt_info *ci,
 	dun_bytes = fscrypt_get_dun_bytes(ci);
 
 	for (i = 0; i < num_devs; i++) {
-		if (!keyslot_manager_crypto_mode_supported(devs[i]->ksm,
-							   crypto_mode,
-							   dun_bytes,
-							   sb->s_blocksize,
-							   is_hw_wrapped_key))
+		bool supported =
+			keyslot_manager_crypto_mode_supported(devs[i]->ksm,
+							      crypto_mode,
+							      dun_bytes,
+							      sb->s_blocksize,
+							      is_hw_wrapped_key);
+
+		if (!supported) {
+			if (legacy_private) {
+				fscrypt_err(inode,
+					    "legacy private mode requires inline encryption hardware");
+				err = -EOPNOTSUPP;
+			}
 			goto out_free_devs;
+		}
 	}
 
 	ci->ci_inlinecrypt = true;
 out_free_devs:
 	kfree(devs);
-	return 0;
+	return err;
 }
 
 int fscrypt_prepare_inline_crypt_key(struct fscrypt_prepared_key *prep_key,
@@ -358,8 +396,9 @@ void fscrypt_set_bio_crypt_ctx(struct bio *bio, const struct inode *inode,
 	bio_crypt_set_ctx(bio, &ci->ci_key.blk_key->base, dun, gfp_mask);
 	if ((fscrypt_policy_contents_mode(&ci->ci_policy) ==
 	    FSCRYPT_MODE_PRIVATE) &&
-	    (!strcmp(inode->i_sb->s_type->name, "ext4")))
+	    (!strcmp(inode->i_sb->s_type->name, "ext4"))) {
 		bio->bi_crypt_context->is_ext4 = true;
+	}
 }
 EXPORT_SYMBOL_GPL(fscrypt_set_bio_crypt_ctx);
 

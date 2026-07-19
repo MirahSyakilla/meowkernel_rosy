@@ -304,11 +304,7 @@ static int setup_v1_file_key_derived(struct fscrypt_info *ci,
 {
 	u8 *derived_key = NULL;
 	int err;
-	int i;
-	union {
-		u8 bytes[FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE];
-		u32 words[FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE / sizeof(u32)];
-	} key_new;
+	u8 key_new[FSCRYPT_MAX_HW_WRAPPED_KEY_SIZE];
 
 	/*Support legacy ice based content encryption mode*/
 	if ((fscrypt_policy_contents_mode(&ci->ci_policy) ==
@@ -344,15 +340,18 @@ static int setup_v1_file_key_derived(struct fscrypt_info *ci,
 		if (err)
 			goto out;
 
-		memcpy(key_new.bytes, derived_key, ci->ci_mode->keysize);
+		memcpy(key_new, derived_key, ci->ci_mode->keysize);
 #else
-		memcpy(key_new.bytes, raw_master_key, ci->ci_mode->keysize);
+		memcpy(key_new, raw_master_key, ci->ci_mode->keysize);
 #endif
 
-		for (i = 0; i < ARRAY_SIZE(key_new.words); i++)
-			__cpu_to_be32s(&key_new.words[i]);
-
-		err = setup_v1_file_key_direct(ci, key_new.bytes);
+		/*
+		 * Match the working 4.9 PFK path: FSCRYPT_MODE_PRIVATE passes
+		 * the derived 64-byte key material to ICE as raw 32-byte key +
+		 * raw 32-byte salt.  The ICE2 SET_KEY wrapper owns the split;
+		 * fscrypt must not pre-swap words here.
+		 */
+		err = setup_v1_file_key_direct(ci, key_new);
 
 		if (derived_key)
 			kzfree(derived_key);
