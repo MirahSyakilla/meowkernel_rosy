@@ -61,6 +61,8 @@
   Include Files
   ------------------------------------------------------------------------*/
 //#include <wlan_qct_driver.h>
+#include <linux/printk.h>
+
 #include <wlan_hdd_includes.h>
 #include <vos_api.h>
 #include <vos_nvitem.h>
@@ -11724,6 +11726,12 @@ void hdd_connect_result(struct net_device *dev,
    hdd_adapter_t *padapter = (hdd_adapter_t *) netdev_priv(dev);
    struct cfg80211_bss *bss = NULL;
 
+	pr_info_ratelimited("rosy_wifi_diag: cfg_res s=%u q=%u p=%u i=%u\n",
+			    (unsigned int)status,
+			    (unsigned int)req_ie_len,
+			    (unsigned int)resp_ie_len,
+			    !!roam_info);
+
    if (WLAN_STATUS_SUCCESS == status) {
        struct ieee80211_channel *chan;
        int freq;
@@ -11773,6 +11781,12 @@ void hdd_connect_result(struct net_device *dev,
    u16 status,
    gfp_t gfp)
 {
+	pr_info_ratelimited("rosy_wifi_diag: cfg_res s=%u q=%u p=%u i=%u\n",
+			    (unsigned int)status,
+			    (unsigned int)req_ie_len,
+			    (unsigned int)resp_ie_len,
+			    !!roam_info);
+
    cfg80211_connect_result(dev, bssid, req_ie, req_ie_len,
          resp_ie, resp_ie_len, status, gfp);
 }

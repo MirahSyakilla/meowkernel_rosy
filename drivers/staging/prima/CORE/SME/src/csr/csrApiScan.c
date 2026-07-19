@@ -1716,6 +1716,7 @@ eHalStatus csrScanHandleSearchForSSID(tpAniSirGlobal pMac, tSmeCmd *pCommand)
     tCsrRoamProfile *pProfile = pCommand->u.scanCmd.pToRoamProfile;
     tANI_U32 sessionId = pCommand->sessionId;
     tCsrRoamSession *pSession = CSR_GET_SESSION(pMac, sessionId);
+	tANI_U32 diag_phase = 0;
 
     do
     {
@@ -1732,12 +1733,14 @@ eHalStatus csrScanHandleSearchForSSID(tpAniSirGlobal pMac, tSmeCmd *pCommand)
             break;
         }
 #endif
+	diag_phase = 1;
         if (!pSession)
         {
             smsLog(pMac, LOGE, FL("session %d not found"), sessionId);
             break;
         }
         /* If Disconnect is already issued from HDD no need to issue connect */
+	diag_phase = 2;
         if (pSession->abortConnection)
         {
            smsLog(pMac, LOGE,
@@ -1745,13 +1748,16 @@ eHalStatus csrScanHandleSearchForSSID(tpAniSirGlobal pMac, tSmeCmd *pCommand)
            break;
         }
         //If there is roam command waiting, ignore this roam because the newer roam command is the one to execute
+	diag_phase = 3;
         if(csrIsRoamCommandWaitingForSession(pMac, sessionId))
         {
             smsLog(pMac, LOGW, FL(" aborts because roam command waiting"));
             break;
         }
+	diag_phase = 4;
         if(pProfile == NULL)
             break;
+	diag_phase = 5;
         pScanFilter = vos_mem_malloc(sizeof(tCsrScanResultFilter));
         if ( NULL == pScanFilter )
                 status = eHAL_STATUS_FAILURE;
@@ -1760,12 +1766,15 @@ eHalStatus csrScanHandleSearchForSSID(tpAniSirGlobal pMac, tSmeCmd *pCommand)
         if (!HAL_STATUS_SUCCESS(status))
             break;
         vos_mem_set(pScanFilter, sizeof(tCsrScanResultFilter), 0);
+	diag_phase = 6;
         status = csrRoamPrepareFilterFromProfile(pMac, pProfile, pScanFilter);
         if(!HAL_STATUS_SUCCESS(status))
             break;
+	diag_phase = 7;
         status = csrScanGetResult(pMac, pScanFilter, &hBSSList);
         if(!HAL_STATUS_SUCCESS(status))
             break;
+	diag_phase = 8;
         status = csrRoamIssueConnect(pMac, sessionId, pProfile, hBSSList, eCsrHddIssued, 
                                     pCommand->u.scanCmd.roamId, eANI_BOOLEAN_TRUE, eANI_BOOLEAN_TRUE);
         if(!HAL_STATUS_SUCCESS(status))
@@ -1775,6 +1784,31 @@ eHalStatus csrScanHandleSearchForSSID(tpAniSirGlobal pMac, tSmeCmd *pCommand)
     }while(0);
     if(!HAL_STATUS_SUCCESS(status))
     {
+		eHalStatus diag_status = status;
+		tANI_U32 diag_bssids = 0;
+		tANI_U32 diag_channels = 0;
+		tANI_U32 diag_auth = 0;
+		tANI_U32 diag_uc = 0;
+		tANI_U32 diag_mc = 0;
+
+		if (pProfile) {
+			diag_bssids = pProfile->BSSIDs.numOfBSSIDs;
+			diag_channels = pProfile->ChannelInfo.numOfChannels;
+		}
+		if (pScanFilter) {
+			diag_auth = pScanFilter->authType.numEntries;
+			diag_uc = pScanFilter->EncryptionType.numEntries;
+			diag_mc = pScanFilter->mcEncryptionType.numEntries;
+		}
+		pr_info_ratelimited("rosy_wifi_diag: ssid_fail p=%u st=%u h=%u b=%u c=%u a=%u u=%u m=%u\n",
+				    (unsigned int)diag_phase,
+				    (unsigned int)diag_status,
+				    hBSSList != CSR_INVALID_SCANRESULT_HANDLE,
+				    (unsigned int)diag_bssids,
+				    (unsigned int)diag_channels,
+				    (unsigned int)diag_auth,
+				    (unsigned int)diag_uc,
+				    (unsigned int)diag_mc);
         if(CSR_INVALID_SCANRESULT_HANDLE != hBSSList)
         {
             csrScanResultPurge(pMac, hBSSList);
@@ -2486,6 +2520,15 @@ eHalStatus csrScanGetResult(tpAniSirGlobal pMac, tCsrScanResultFilter *pFilter, 
     tDot11fBeaconIEs *pIes, *pNewIes;
     tANI_BOOLEAN fMatch;
     tANI_U16 i = 0;
+	tANI_U32 scan_total = 0;
+	tANI_U32 scan_ssid_pass = 0;
+	tANI_U32 scan_bssid_pass = 0;
+	tANI_U32 filter_ssids = 0;
+	tANI_U32 filter_bssids = 0;
+	tANI_U32 filter_channels = 0;
+	tANI_U32 filter_auth = 0;
+	tANI_U32 filter_uc = 0;
+	tANI_U32 filter_mc = 0;
     tCsrRoamSession *pSession = CSR_GET_SESSION(pMac,
                                     pMac->roam.roamSession->sessionId);
 
@@ -2617,6 +2660,51 @@ eHalStatus csrScanGetResult(tpAniSirGlobal pMac, tCsrScanResultFilter *pFilter, 
         while( pEntry ) 
         {
             pBssDesc = GET_BASE_ADDR( pEntry, tCsrScanResult, Link );
+		scan_total++;
+		if (pFilter) {
+			tANI_BOOLEAN diag_ssid;
+			tANI_BOOLEAN diag_bssid;
+
+			diag_ssid = pFilter->SSIDs.numOfSSIDs == 0;
+			diag_bssid = pFilter->BSSIDs.numOfBSSIDs == 0;
+			for (i = 0; i < pFilter->SSIDs.numOfSSIDs; i++) {
+				tCsrSSIDInfo *filter_ssid;
+				tANI_U8 *filter_name;
+				tANI_U8 *result_name;
+				tANI_U8 filter_len;
+				tANI_U8 result_len;
+
+				filter_ssid = &pFilter->SSIDs.SSIDList[i];
+				filter_name = filter_ssid->SSID.ssId;
+				result_name = pBssDesc->Result.ssId.ssId;
+				filter_len = filter_ssid->SSID.length;
+				result_len = pBssDesc->Result.ssId.length;
+				if (filter_len == result_len &&
+				    vos_mem_compare(filter_name, result_name, filter_len)) {
+					diag_ssid = eANI_BOOLEAN_TRUE;
+					break;
+				}
+			}
+			if (diag_ssid) {
+				scan_ssid_pass++;
+				for (i = 0;
+				     i < pFilter->BSSIDs.numOfBSSIDs; i++) {
+					tCsrBssid *filter_bssid;
+					tCsrBssid *result_bssid;
+
+					filter_bssid =
+						(tCsrBssid *)&pFilter->BSSIDs.bssid[i];
+					result_bssid = (tCsrBssid *)
+						pBssDesc->Result.BssDescriptor.bssId;
+					if (csrIsBssidMatch(pMac, filter_bssid, result_bssid)) {
+						diag_bssid = eANI_BOOLEAN_TRUE;
+						break;
+					}
+				}
+				if (diag_bssid)
+					scan_bssid_pass++;
+			}
+		}
             pIes = (tDot11fBeaconIEs *)( pBssDesc->Result.pvIes );
             //if pBssDesc->Result.pvIes is NULL, we need to free any memory allocated by csrMatchBSS
             //for any error condition, otherwiase, it will be freed later.
@@ -2806,6 +2894,28 @@ eHalStatus csrScanGetResult(tpAniSirGlobal pMac, tCsrScanResultFilter *pFilter, 
         {
             if(0 == count)
             {
+				if (pFilter) {
+					filter_ssids = pFilter->SSIDs.numOfSSIDs;
+					filter_bssids = pFilter->BSSIDs.numOfBSSIDs;
+					filter_channels =
+						pFilter->ChannelInfo.numOfChannels;
+					filter_auth = pFilter->authType.numEntries;
+					filter_uc =
+						pFilter->EncryptionType.numEntries;
+					filter_mc =
+						pFilter->mcEncryptionType.numEntries;
+					pr_info_ratelimited("rosy_wifi_diag: scan_nil t=%u s=%u b=%u f=%u x=%u y=%u z=%u a=%u u=%u m=%u\n",
+							    (unsigned int)scan_total,
+							    (unsigned int)scan_ssid_pass,
+							    (unsigned int)scan_bssid_pass,
+							    (unsigned int)count,
+							    (unsigned int)filter_ssids,
+							    (unsigned int)filter_bssids,
+							    (unsigned int)filter_channels,
+							    (unsigned int)filter_auth,
+							    (unsigned int)filter_uc,
+							    (unsigned int)filter_mc);
+				}
                 //We are here meaning the there is no match
                 csrLLClose(&pRetList->List);
                 vos_mem_free(pRetList);

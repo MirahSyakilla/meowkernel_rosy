@@ -52,6 +52,8 @@
 06/03/10     js                     Added support to hostapd driven 
  *                                  deauth/disassoc/mic failure
 ===========================================================================*/
+#include <linux/printk.h>
+
 #include "aniGlobal.h" //for tpAniSirGlobal
 #include "wlan_qct_wda.h"
 #include "halMsgApi.h" //for HAL_STA_INVALID_IDX.
@@ -6386,6 +6388,13 @@ static tANI_BOOLEAN csrRoamProcessResults( tpAniSirGlobal pMac, tSmeCmd *pComman
         case eCsrJoinFailureDueToConcurrency:
         default:
         {
+	    pr_info_ratelimited("rosy_wifi_diag: csr_pre r=%u s=%u q=%u n=%u b=%u c=%u\n",
+				(unsigned int)Result,
+				(unsigned int)pSession->joinFailStatusCode.statusCode,
+				(unsigned int)pSession->joinFailStatusCode.reasonCode,
+				(unsigned int)pSession->bRefAssocStartCnt,
+				!!pCommand->u.roamCmd.pLastRoamBss,
+				(unsigned int)pCommand->u.roamCmd.roamReason);
             smsLog(pMac, LOGW, FL("receives no association indication"));
             smsLog(pMac, LOG1, FL("Assoc ref count %d"),
                    pSession->bRefAssocStartCnt);
@@ -8029,6 +8038,11 @@ static void csrRoamJoinRspProcessor( tpAniSirGlobal pMac, tSirSmeJoinRsp *pSmeJo
         }
         pSession->joinFailStatusCode.statusCode = pSmeJoinRsp->statusCode;
         pSession->joinFailStatusCode.reasonCode = pSmeJoinRsp->protStatusCode;
+	pr_info_ratelimited("rosy_wifi_diag: csr_fail st=%u prot=%u req=%u rsp=%u\n",
+			    (unsigned int)pSmeJoinRsp->statusCode,
+			    (unsigned int)pSmeJoinRsp->protStatusCode,
+			    (unsigned int)pSmeJoinRsp->assocReqLength,
+			    (unsigned int)pSmeJoinRsp->assocRspLength);
         smsLog( pMac, LOGW, "SmeJoinReq failed with statusCode= 0x%08X [%d]", pSmeJoinRsp->statusCode, pSmeJoinRsp->statusCode );
 #if   defined WLAN_FEATURE_NEIGHBOR_ROAMING
         /* If Join fails while Handoff is in progress, indicate disassociated event to supplicant to reconnect */

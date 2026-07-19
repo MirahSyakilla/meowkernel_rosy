@@ -47,6 +47,8 @@
   05/06/09     Shailender     Created module.
   ==========================================================================*/
 
+#include <linux/printk.h>
+
 #include "wlan_hdd_includes.h"
 #include <aniGlobal.h>
 #include "dot11f.h"
@@ -4027,6 +4029,15 @@ eHalStatus hdd_smeRoamCallback( void *pContext, tCsrRoamInfo *pRoamInfo, tANI_U3
     struct cfg80211_bss *bss_status;
     hdd_context_t *pHddCtx = NULL;
 
+	pr_info_ratelimited("rosy_wifi_diag: hdd_cb s=%u r=%u i=%u c=%u q=%u a=%u p=%u\n",
+			    (unsigned int)roamStatus,
+			    (unsigned int)roamResult,
+			    !!pRoamInfo,
+			    pRoamInfo ? (unsigned int)pRoamInfo->statusCode : 0U,
+			    pRoamInfo ? (unsigned int)pRoamInfo->reasonCode : 0U,
+			    pRoamInfo ? (unsigned int)pRoamInfo->nAssocReqLength : 0U,
+			    pRoamInfo ? (unsigned int)pRoamInfo->nAssocRspLength : 0U);
+
     VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH,
             "CSR Callback: status= %d result= %d roamID=%d",
                     roamStatus, roamResult, roamId );
@@ -6378,4 +6389,3 @@ end:
     }
     return NULL;
 }
-

@@ -6006,6 +6006,21 @@ static inline bool csr_match_security(tpAniSirGlobal mac_ctx,
 }
 #endif
 
+static void csr_wifi_diag_match_reject(tANI_U32 reason, tANI_U32 auth,
+				       tANI_U32 uc, tANI_U32 mc,
+				       tANI_U32 phy, tANI_U32 bss,
+				       tANI_U32 mfp)
+{
+	pr_info_ratelimited("rosy_wifi_diag: match_rej r=%u a=%u u=%u m=%u p=%u b=%u f=%u\n",
+			    (unsigned int)reason,
+			    (unsigned int)auth,
+			    (unsigned int)uc,
+			    (unsigned int)mc,
+			    (unsigned int)phy,
+			    (unsigned int)bss,
+			    (unsigned int)mfp);
+}
+
 //ppIes can be NULL. If caller want to get the *ppIes allocated by this function, pass in *ppIes = NULL
 tANI_BOOLEAN csrMatchBSS( tHalHandle hHal, tSirBssDescription *pBssDesc, tCsrScanResultFilter *pFilter, 
                           eCsrAuthType *pNegAuth, eCsrEncryptionType *pNegUc, eCsrEncryptionType *pNegMc,
@@ -6016,6 +6031,25 @@ tANI_BOOLEAN csrMatchBSS( tHalHandle hHal, tSirBssDescription *pBssDesc, tCsrSca
     tANI_U32 i;
     tDot11fBeaconIEs *pIes = NULL;
     tANI_U8 *pb;
+	tANI_U32 diag_auth = 0;
+	tANI_U32 diag_uc = 0;
+	tANI_U32 diag_mc = 0;
+	tANI_U32 diag_mfp = 0;
+	tANI_U32 diag_phy = pFilter->phyMode;
+	tANI_U32 diag_bss = pFilter->BSSType;
+
+	if (pFilter->authType.numEntries)
+		diag_auth = pFilter->authType.authType[0];
+	if (pFilter->EncryptionType.numEntries)
+		diag_uc = pFilter->EncryptionType.encryptionType[0];
+	if (pFilter->mcEncryptionType.numEntries)
+		diag_mc = pFilter->mcEncryptionType.encryptionType[0];
+
+#ifdef WLAN_FEATURE_11W
+	diag_mfp = !!pFilter->MFPEnabled;
+	diag_mfp |= (!!pFilter->MFPRequired) << 1;
+	diag_mfp |= (!!pFilter->MFPCapable) << 2;
+#endif
 
     do {
         if( ( NULL == ppIes ) || ( *ppIes ) == NULL )
@@ -6069,8 +6103,11 @@ tANI_BOOLEAN csrMatchBSS( tHalHandle hHal, tSirBssDescription *pBssDesc, tCsrSca
             fCheck = csrIsChannelBandMatch( pMac, pFilter->ChannelInfo.ChannelList[i], pBssDesc );
             if ( fCheck ) break;
         }
-        if(!fCheck)
-            break;
+	if (!fCheck) {
+		csr_wifi_diag_match_reject(1, diag_auth, diag_uc, diag_mc,
+					   diag_phy, diag_bss, diag_mfp);
+		break;
+	}
 #if defined WLAN_FEATURE_VOWIFI
         /* If this is for measurement filtering */
         if( pFilter->fMeasurement )
@@ -6079,33 +6116,67 @@ tANI_BOOLEAN csrMatchBSS( tHalHandle hHal, tSirBssDescription *pBssDesc, tCsrSca
            break;
         }
 #endif
-        if ( !csrIsPhyModeMatch( pMac, pFilter->phyMode, pBssDesc, NULL, NULL, pIes ) ) break;
-        if ( !csr_match_security(pMac, pFilter, pBssDesc, pIes, pNegAuth, pNegUc, pNegMc)) break;
-        if ( !csrIsCapabilitiesMatch( pMac, pFilter->BSSType, pBssDesc ) ) break;
-        if ( !csrIsRateSetMatch( pMac, &pIes->SuppRates, &pIes->ExtSuppRates ) ) break;
+	if (!csrIsPhyModeMatch(pMac, pFilter->phyMode, pBssDesc, NULL,
+			       NULL, pIes)) {
+		csr_wifi_diag_match_reject(2, diag_auth, diag_uc, diag_mc,
+					   diag_phy, diag_bss, diag_mfp);
+		break;
+	}
+	if (!csr_match_security(pMac, pFilter, pBssDesc, pIes, pNegAuth,
+				pNegUc, pNegMc)) {
+		csr_wifi_diag_match_reject(3, diag_auth, diag_uc, diag_mc,
+					   diag_phy, diag_bss, diag_mfp);
+		break;
+	}
+	if (!csrIsCapabilitiesMatch(pMac, pFilter->BSSType, pBssDesc)) {
+		csr_wifi_diag_match_reject(4, diag_auth, diag_uc, diag_mc,
+					   diag_phy, diag_bss, diag_mfp);
+		break;
+	}
+	if (!csrIsRateSetMatch(pMac, &pIes->SuppRates,
+			       &pIes->ExtSuppRates)) {
+		csr_wifi_diag_match_reject(5, diag_auth, diag_uc, diag_mc,
+					   diag_phy, diag_bss, diag_mfp);
+		break;
+	}
         //Tush-QoS: validate first if asked for APSD or WMM association
-        if ( (eCsrRoamWmmQbssOnly == pMac->roam.configParam.WMMSupportMode) &&
-             !CSR_IS_QOS_BSS(pIes) )
-             break;
+	if (eCsrRoamWmmQbssOnly ==
+	    pMac->roam.configParam.WMMSupportMode &&
+	    !CSR_IS_QOS_BSS(pIes)) {
+		csr_wifi_diag_match_reject(6, diag_auth, diag_uc, diag_mc,
+					   diag_phy, diag_bss, diag_mfp);
+		break;
+	}
         //Check country. check even when pb is NULL because we may want to make sure
         //AP has a country code in it if fEnforceCountryCodeMatch is set.
         pb = ( pFilter->countryCode[0] ) ? ( pFilter->countryCode) : NULL;
 
         fCheck = csrMatchCountryCode( pMac, pb, pIes );
-        if(!fCheck)
-            break;
+	if (!fCheck) {
+		csr_wifi_diag_match_reject(7, diag_auth, diag_uc, diag_mc,
+					   diag_phy, diag_bss, diag_mfp);
+		break;
+	}
 
 #ifdef WLAN_FEATURE_VOWIFI_11R
-        if (pFilter->MDID.mdiePresent && csrRoamIs11rAssoc(pMac))
-        {
-            if (pBssDesc->mdiePresent)
-            {
-                if (pFilter->MDID.mobilityDomain != (pBssDesc->mdie[1] << 8 | pBssDesc->mdie[0]))
-                    break;
-            }
-            else
-                break;
-        }
+	if (pFilter->MDID.mdiePresent && csrRoamIs11rAssoc(pMac)) {
+		if (pBssDesc->mdiePresent) {
+			if (pFilter->MDID.mobilityDomain !=
+			    (pBssDesc->mdie[1] << 8 |
+			     pBssDesc->mdie[0])) {
+				csr_wifi_diag_match_reject(8, diag_auth,
+							   diag_uc, diag_mc,
+							   diag_phy, diag_bss,
+							   diag_mfp);
+				break;
+			}
+		} else {
+			csr_wifi_diag_match_reject(8, diag_auth, diag_uc,
+						   diag_mc, diag_phy,
+						   diag_bss, diag_mfp);
+			break;
+		}
+	}
 #endif
         fRC = eANI_BOOLEAN_TRUE;
 

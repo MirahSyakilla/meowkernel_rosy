@@ -37,6 +37,8 @@
  *
  */
 
+#include <linux/printk.h>
+
 #include "wniApi.h"
 #include "wniCfg.h"
 #include "aniGlobal.h"
@@ -523,6 +525,11 @@ limProcessAssocRspFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tANI_U8 sub
     }
 
     mlmAssocCnf.protStatusCode = pAssocRsp->statusCode;
+	pr_info_ratelimited("rosy_wifi_diag: pe_rsp st=%u len=%u sub=%u rates=%u\n",
+			    (unsigned int)pAssocRsp->statusCode,
+			    (unsigned int)frameLen,
+			    (unsigned int)subType,
+			    (unsigned int)pAssocRsp->suppRatesPresent);
 
     if( psessionEntry->assocRsp != NULL )
     {
@@ -1034,4 +1041,3 @@ assocReject:
     vos_mem_free(pAssocRsp);
     return;
 } /*** end limProcessAssocRspFrame() ***/
-
