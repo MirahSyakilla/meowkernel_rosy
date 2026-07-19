@@ -5732,7 +5732,16 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	/* Set host capabilities */
 	msm_host->mmc->caps |= msm_host->pdata->mmc_bus_width;
 	msm_host->mmc->caps |= msm_host->pdata->caps;
-	msm_host->mmc->caps |= MMC_CAP_AGGRESSIVE_PM;
+	/*
+	 * Keep Rosy's legacy ICE2 eMMC out of card-level aggressive runtime
+	 * suspend. Its CQE/ICE2 path times out in the EXT_CSD and sleep/awake
+	 * commands, while controller runtime PM itself remains usable.
+	 */
+	if (!legacy_ice_v2)
+		msm_host->mmc->caps |= MMC_CAP_AGGRESSIVE_PM;
+	else
+		dev_info(&pdev->dev,
+			 "legacy ICE2: aggressive MMC runtime PM disabled\n");
 	msm_host->mmc->caps |= MMC_CAP_WAIT_WHILE_BUSY;
 	msm_host->mmc->caps2 |= msm_host->pdata->caps2;
 	msm_host->mmc->caps2 |= MMC_CAP2_BOOTPART_NOACC;
