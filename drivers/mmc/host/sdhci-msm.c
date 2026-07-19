@@ -98,6 +98,8 @@
 #define CORE_HC_SELECT_IN_HS400	(6 << 19)
 #define CORE_HC_SELECT_IN_MASK	(7 << 19)
 #define CORE_VENDOR_SPEC_POR_VAL	0xA1C
+#define CORE_VENDOR_SPEC_ICE_CTRL	0x300
+#define SDHCI_MSM_LEGACY_ICE_V2_PROP	"qcom,legacy-ice-v2"
 
 #define HC_SW_RST_WAIT_IDLE_DIS	(1 << 20)
 #define HC_SW_RST_REQ (1 << 21)
@@ -369,6 +371,27 @@ enum dll_init_context {
 
 static unsigned int sdhci_msm_get_sup_clk_rate(struct sdhci_host *host,
 						u32 req_clk);
+
+static bool sdhci_msm_has_legacy_ice_v2(struct sdhci_host *host)
+{
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_msm_host *msm_host = pltfm_host->priv;
+
+	return msm_host && msm_host->pdev &&
+		of_property_read_bool(msm_host->pdev->dev.of_node,
+				      SDHCI_MSM_LEGACY_ICE_V2_PROP);
+}
+
+static void sdhci_msm_reset_legacy_ice_v2(struct sdhci_host *host)
+{
+	if (!sdhci_msm_has_legacy_ice_v2(host))
+		return;
+
+	/* Reset ICE in sync with the pre-HCI SDHC controller. */
+	writel_relaxed(1, host->ioaddr + CORE_VENDOR_SPEC_ICE_CTRL);
+	/* Ensure ICE reset sync is visible before the controller reset. */
+	mb();
+}
 
 /* MSM platform specific tuning */
 static inline int msm_dll_poll_ck_out_en(struct sdhci_host *host,
@@ -4434,6 +4457,8 @@ void sdhci_msm_dump_vendor_regs(struct sdhci_host *host)
 
 static void sdhci_msm_reset(struct sdhci_host *host, u8 mask)
 {
+	if (mask & SDHCI_RESET_ALL)
+		sdhci_msm_reset_legacy_ice_v2(host);
 	sdhci_reset(host, mask);
 	if ((host->mmc->caps2 & MMC_CAP2_CQE) && (mask & SDHCI_RESET_ALL))
 		cqhci_suspend(host->mmc);
@@ -5101,6 +5126,7 @@ static void sdhci_msm_hw_reset(struct sdhci_host *host)
 		host->mmc->cqe_enabled = false;
 	}
 
+	sdhci_msm_reset_legacy_ice_v2(host);
 	sdhci_msm_gcc_reset(&pdev->dev, host);
 	sdhci_msm_registers_restore(host);
 	msm_host->reg_store = false;

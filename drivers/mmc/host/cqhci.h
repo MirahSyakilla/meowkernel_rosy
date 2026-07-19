@@ -296,6 +296,7 @@ struct cqhci_host {
 	bool waiting_for_idle;
 	bool recovery_halt;
 	bool offset_changed;
+	bool crypto_ice2;
 
 	size_t desc_size;
 	size_t data_size;

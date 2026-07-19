@@ -136,7 +136,15 @@
 	};
 };
 
+&sdcc1_ice {
+	/delete-property/ interrupts;
+	/delete-property/ interrupt-names;
+};
+
 &sdhc_1 {
-	reg = <0x7824900 0x500>, <0x7824000 0x800>, <0x7824e00 0x200>;
-	reg-names = "hc_mem", "core_mem", "cmdq_mem";
+	compatible = "qcom,sdhci-msm", "qcom,sdhci-msm-cqe";
+	reg = <0x7824900 0x500>, <0x7824000 0x800>, <0x7824e00 0x200>,
+		<0x7803000 0x8000>;
+	reg-names = "hc_mem", "core_mem", "cqhci_mem", "cqhci_ice";
+	qcom,legacy-ice-v2;
 };

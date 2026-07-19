@@ -280,7 +280,7 @@ static void __cqhci_enable(struct cqhci_host *cq_host)
 	if (cq_host->caps & CQHCI_TASK_DESC_SZ_128)
 		cqcfg |= CQHCI_TASK_DESC_SZ;
 
-	if (cqhci_host_is_crypto_supported(cq_host)) {
+	if (cqhci_host_is_crypto_supported(cq_host) && !cq_host->crypto_ice2) {
 		cqcfg |= CQHCI_ICE_ENABLE;
 		/* For SDHC v5.0 onwards, ICE 3.0 specific registers are added
 		 * in CQ register space, due to which few CQ registers are
@@ -644,7 +644,8 @@ void cqhci_prep_crypto_desc(struct cqhci_host *cq_host, u64 *task_desc,
 {
 	u64 *ice_desc = NULL;
 
-	if (cq_host->caps & CQHCI_CAP_CRYPTO_SUPPORT) {
+	if ((cq_host->caps & CQHCI_CAP_CRYPTO_SUPPORT) &&
+	    !cq_host->crypto_ice2) {
 		/*
 		 * Get the address of ice context for the given task descriptor.
 		 * ice context is present in the upper 64bits of task descriptor
