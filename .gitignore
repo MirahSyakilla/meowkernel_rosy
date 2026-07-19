@@ -58,6 +58,11 @@ modules.builtin
 /System.map
 /Module.markers
 
+# Local Rosy bring-up notes; keep these out of kernel commits.
+/ongoing.md
+/commit_list.md
+/trial_list.md
+
 #
 # RPM spec file (make rpm-pkg)
 #
