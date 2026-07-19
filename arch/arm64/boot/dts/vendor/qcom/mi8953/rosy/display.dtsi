@@ -1,7 +1,4 @@
 #include "../common/panel/dsi-panel-ft8613-ebbg-5p7-720p-video.dtsi"
-#include "../common/panel/dsi-panel-ft8006m-boe-5p7-720p-video.dtsi"
-#include "../common/panel/dsi-panel-ft8613-ebbg-5p5-1080p-video.dtsi"
-#include "../common/panel/dsi-panel-ft8613-csot-5p7-720p-video.dtsi"
 
 &tlmm {
 	pmx_mdss {
@@ -24,19 +21,30 @@
 	};
 };
 
-&dsi_r69006_1080p_cmd {
-	qcom,esd-check-enabled;
-};
-
 &mdss_dsi0 {
-    qcom,dsi-pref-prim-pan = <&dsi_ft8613_ebbg_5p7_720p_video>;
-	qcom,dsi-pref-sub-pan = <&dsi_ft8006m_boe_5p7_720p_video>;
-	qcom,dsi-pref-sub1-pan = <&dsi_ft8613_csot_5p7_720p_video>;
-	qcom,dsi-pref-sub2-pan = <&dsi_ft8613_ebbg_5p5_1080p_video>;
+	qcom,dsi-pref-prim-pan = <&dsi_ft8613_ebbg_5p7_720p_video>;
 	pinctrl-0 = <&mdss_dsi_active>;
 	pinctrl-1 = <&mdss_dsi_suspend>;
-    qcom,platform-reset-gpio = <&tlmm 61 0>;
+	qcom,platform-reset-gpio = <&tlmm 61 0>;
 	iovdd_gpio-supply = <&iovdd_gpio_vreg>;
+};
+
+&clock_gcc_mdss {
+	/*
+	 * Rosy is a single-DSI board and keeps the second DSI PLL disabled.
+	 * The 8953 MDSS GCC shim still requires all four external parent
+	 * lookups before it registers the MDP/rotator vote clocks, so feed the
+	 * unused secondary pixel/byte parents from DSI0 as inert stand-ins.
+	 */
+	qcom,single-dsi-clock-parent-fallback;
+	clocks = <&mdss_dsi0_pll clk_dsi0pll_pixel_clk_mux>,
+		<&mdss_dsi0_pll clk_dsi0pll_pixel_clk_mux>,
+		<&mdss_dsi0_pll clk_dsi0pll_byte_clk_mux>,
+		<&mdss_dsi0_pll clk_dsi0pll_byte_clk_mux>;
+};
+
+&mdss_dsi1_pll {
+	status = "disabled";
 };
 
 &labibb {
@@ -75,33 +83,7 @@
 };
 
 &dsi_ft8613_ebbg_5p7_720p_video {
-		qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
-		qcom,qpnp-ibb-init-lcd-voltage = <5800000>;
-		qcom,qpnp-lab-init-lcd-voltage = <5800000>;
-};
-
-&dsi_ft8006m_boe_5p7_720p_video {
-		qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
-		qcom,qpnp-ibb-init-lcd-voltage = <6000000>;
-		qcom,qpnp-lab-init-lcd-voltage = <6000000>;
-};
-
-&dsi_ft8613_csot_5p7_720p_video {
-		qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
-		qcom,qpnp-ibb-init-lcd-voltage = <5800000>;
-		qcom,qpnp-lab-init-lcd-voltage = <5800000>;
-};
-
-&dsi_ft8613_ebbg_5p5_1080p_video {
-		qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
-		qcom,qpnp-ibb-init-lcd-voltage = <5800000>;
-		qcom,qpnp-lab-init-lcd-voltage = <5800000>;
-};
-
-&dsi_r69006_1080p_cmd {
-		qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
-};
-
-&dsi_r69006_1080p_video {
-		qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
+	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
+	qcom,qpnp-ibb-init-lcd-voltage = <5800000>;
+	qcom,qpnp-lab-init-lcd-voltage = <5800000>;
 };

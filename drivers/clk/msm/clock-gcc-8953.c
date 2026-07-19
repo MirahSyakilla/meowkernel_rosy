@@ -3827,7 +3827,11 @@ static int msm_gcc_mdss_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct clk *curr_p;
+	bool single_dsi_fallback;
 	struct resource *res;
+
+	single_dsi_fallback = of_property_read_bool(pdev->dev.of_node,
+			"qcom,single-dsi-clock-parent-fallback");
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cc_base");
 	if (!res) {
@@ -3845,32 +3849,53 @@ static int msm_gcc_mdss_probe(struct platform_device *pdev)
 	curr_p = ext_pclk0_clk_src.c.parent = devm_clk_get(&pdev->dev,
 								"pclk0_src");
 	if (IS_ERR(curr_p)) {
-		dev_err(&pdev->dev, "Failed to get pclk0 source.\n");
-		return PTR_ERR(curr_p);
-	}
-
-	curr_p = ext_pclk1_clk_src.c.parent = devm_clk_get(&pdev->dev,
-								"pclk1_src");
-	if (IS_ERR(curr_p)) {
-		dev_err(&pdev->dev, "Failed to get pclk1 source.\n");
 		ret = PTR_ERR(curr_p);
-		goto pclk1_fail;
+		if (ret == -ENOENT)
+			ret = -EPROBE_DEFER;
+		dev_err(&pdev->dev, "Failed to get pclk0 source.\n");
+		return ret;
 	}
 
 	curr_p = ext_byte0_clk_src.c.parent = devm_clk_get(&pdev->dev,
 								"byte0_src");
 	if (IS_ERR(curr_p)) {
-		dev_err(&pdev->dev, "Failed to get byte0 source.\n");
 		ret = PTR_ERR(curr_p);
-		goto byte0_fail;
+		if (ret == -ENOENT)
+			ret = -EPROBE_DEFER;
+		dev_err(&pdev->dev, "Failed to get byte0 source.\n");
+		return ret;
+	}
+
+	curr_p = ext_pclk1_clk_src.c.parent = devm_clk_get(&pdev->dev,
+								"pclk1_src");
+	if (IS_ERR(curr_p)) {
+		ret = PTR_ERR(curr_p);
+		if (!single_dsi_fallback) {
+			if (ret == -ENOENT)
+				ret = -EPROBE_DEFER;
+			dev_err(&pdev->dev, "Failed to get pclk1 source.\n");
+			return ret;
+		}
+		dev_warn(&pdev->dev,
+			 "Failed to get pclk1 source (%d), using pclk0 source.\n",
+			 ret);
+		ext_pclk1_clk_src.c.parent = ext_pclk0_clk_src.c.parent;
 	}
 
 	curr_p = ext_byte1_clk_src.c.parent = devm_clk_get(&pdev->dev,
 								"byte1_src");
 	if (IS_ERR(curr_p)) {
-		dev_err(&pdev->dev, "Failed to get byte1 source.\n");
 		ret = PTR_ERR(curr_p);
-		goto byte1_fail;
+		if (!single_dsi_fallback) {
+			if (ret == -ENOENT)
+				ret = -EPROBE_DEFER;
+			dev_err(&pdev->dev, "Failed to get byte1 source.\n");
+			return ret;
+		}
+		dev_warn(&pdev->dev,
+			 "Failed to get byte1 source (%d), using byte0 source.\n",
+			 ret);
+		ext_byte1_clk_src.c.parent = ext_byte0_clk_src.c.parent;
 	}
 
 	ext_pclk0_clk_src.c.flags = CLKFLAG_NO_RATE_CACHE;
@@ -3887,13 +3912,6 @@ static int msm_gcc_mdss_probe(struct platform_device *pdev)
 
 	return ret;
 fail:
-	devm_clk_put(&pdev->dev, ext_byte1_clk_src.c.parent);
-byte1_fail:
-	devm_clk_put(&pdev->dev, ext_byte0_clk_src.c.parent);
-byte0_fail:
-	devm_clk_put(&pdev->dev, ext_pclk1_clk_src.c.parent);
-pclk1_fail:
-	devm_clk_put(&pdev->dev, ext_pclk0_clk_src.c.parent);
 	return ret;
 }
 
