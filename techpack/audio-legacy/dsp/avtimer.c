@@ -19,6 +19,12 @@
 #include <linux/sched.h>
 #if IS_ENABLED(CONFIG_AVTIMER_LEGACY)
 #include <media/msmb_isp.h>
+#if IS_ENABLED(CONFIG_MSMB_CAMERA_LEGACY)
+void legacy_msm_isp_set_avtimer_fptr(struct avtimer_fptr_t avtimer_func);
+#endif
+#if IS_ENABLED(CONFIG_MSMB_CAMERA_LEGACY_N)
+void legacy_n_msm_isp_set_avtimer_fptr(struct avtimer_fptr_t avtimer_func);
+#endif
 #endif
 #include <ipc/apr.h>
 #include <dsp/q6core.h>
@@ -386,13 +392,23 @@ static void avcs_set_isp_fptr(bool enable)
 		av_fptr.fptr_avtimer_open = avcs_core_open;
 		av_fptr.fptr_avtimer_enable = avcs_core_disable_power_collapse;
 		av_fptr.fptr_avtimer_get_time = avcs_core_query_timer;
-		msm_isp_set_avtimer_fptr(av_fptr);
 	} else {
 		av_fptr.fptr_avtimer_open = NULL;
 		av_fptr.fptr_avtimer_enable = NULL;
 		av_fptr.fptr_avtimer_get_time = NULL;
-		msm_isp_set_avtimer_fptr(av_fptr);
 	}
+
+#if IS_ENABLED(CONFIG_MSMB_CAMERA_LEGACY)
+	legacy_msm_isp_set_avtimer_fptr(av_fptr);
+#endif
+#if IS_ENABLED(CONFIG_MSMB_CAMERA_LEGACY_N)
+	legacy_n_msm_isp_set_avtimer_fptr(av_fptr);
+#endif
+#if IS_ENABLED(CONFIG_MSMB_CAMERA) && \
+	!IS_ENABLED(CONFIG_MSMB_CAMERA_LEGACY) && \
+	!IS_ENABLED(CONFIG_MSMB_CAMERA_LEGACY_N)
+	msm_isp_set_avtimer_fptr(av_fptr);
+#endif
 }
 #else
 static void avcs_set_isp_fptr(bool enable)
