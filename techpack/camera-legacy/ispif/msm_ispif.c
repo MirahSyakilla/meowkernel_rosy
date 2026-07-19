@@ -20,6 +20,8 @@
 #include <linux/gpio.h>
 #include <linux/iopoll.h>
 #include <linux/compat.h>
+#include <linux/build_bug.h>
+#include <linux/stddef.h>
 #include <media/msmb_isp-legacy.h>
 #include <linux/ratelimit.h>
 
@@ -133,6 +135,17 @@ struct ispif_cfg_data_ext_32 {
 	_IOWR('V', BASE_VIDIOC_PRIVATE+1, struct ispif_cfg_data_ext_32)
 #endif
 
+/*
+ * ISPIF_CFG2 originally carried only the RDI pack-mode configuration.  The
+ * stereo and line-width members were appended later, but Rosy's 32-bit vendor
+ * camera stack still submits the original layout.
+ */
+struct msm_ispif_param_data_ext_v1 {
+	uint32_t num;
+	struct msm_ispif_params_entry entries[MAX_PARAM_ENTRIES];
+	struct msm_ispif_pack_cfg pack_cfg[CID_MAX];
+};
+
 static void msm_ispif_get_pack_mask_from_cfg(
 	struct msm_ispif_pack_cfg *pack_cfg,
 	struct msm_ispif_params_entry *entry,
@@ -231,6 +244,7 @@ static long msm_ispif_cmd_ext(struct v4l2_subdev *sd,
 		(struct ispif_device *)v4l2_get_subdevdata(sd);
 	struct ispif_cfg_data_ext pcdata = {0};
 	struct msm_ispif_param_data_ext *params = NULL;
+	bool legacy_cfg2;
 
 	if (is_compat_task()) {
 #ifdef CONFIG_COMPAT
@@ -257,8 +271,14 @@ static long msm_ispif_cmd_ext(struct v4l2_subdev *sd,
 		pcdata.size = pcdata64->size;
 		pcdata.data = pcdata64->data;
 	}
-	if (pcdata.size != sizeof(struct msm_ispif_param_data_ext)) {
-		pr_err("%s: payload size mismatch\n", __func__);
+	BUILD_BUG_ON(sizeof(struct msm_ispif_param_data_ext_v1) !=
+		     offsetof(struct msm_ispif_param_data_ext, right_entries));
+	legacy_cfg2 = pcdata.cfg_type == ISPIF_CFG2 &&
+		pcdata.size == sizeof(struct msm_ispif_param_data_ext_v1);
+	if (pcdata.size != sizeof(struct msm_ispif_param_data_ext) &&
+		!legacy_cfg2) {
+		pr_err("%s: payload size mismatch %u\n", __func__,
+			pcdata.size);
 		return -EINVAL;
 	}
 
@@ -272,6 +292,9 @@ static long msm_ispif_cmd_ext(struct v4l2_subdev *sd,
 		kfree(params);
 		return -EFAULT;
 	}
+	if (legacy_cfg2)
+		pr_info_once("%s: accepted legacy ISPIF_CFG2 payload (%u bytes)\n",
+			__func__, pcdata.size);
 
 	mutex_lock(&ispif->mutex);
 	rc = msm_ispif_dispatch_cmd(pcdata.cfg_type, ispif, params);
