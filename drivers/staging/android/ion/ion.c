@@ -16,6 +16,7 @@
 #include <linux/file.h>
 #include <linux/freezer.h>
 #include <linux/fs.h>
+#include <linux/highmem.h>
 #include <linux/idr.h>
 #include <linux/kthread.h>
 #include <linux/list.h>
@@ -34,6 +35,7 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/ion.h>
 #include <soc/qcom/secure_buffer.h>
+#include <asm/cacheflush.h>
 
 #include "ion.h"
 #include "ion_secure_util.h"
@@ -1033,6 +1035,99 @@ static const struct dma_buf_ops dma_buf_ops = {
 	.vunmap = ion_dma_buf_vunmap,
 	.get_flags = ion_dma_buf_get_flags,
 };
+
+#ifdef CONFIG_ION_LEGACY
+static void ion_legacy_cache_page_range(struct page *page, size_t offset,
+					size_t length,
+					void (*op)(const void *start,
+						   size_t size))
+{
+	size_t left = length;
+
+	page = nth_page(page, offset >> PAGE_SHIFT);
+	offset &= ~PAGE_MASK;
+
+	while (left) {
+		size_t len = min(left, (size_t)PAGE_SIZE - offset);
+		void *vaddr;
+
+		if (PageHighMem(page)) {
+			vaddr = kmap_atomic(page);
+			op(vaddr + offset, len);
+			kunmap_atomic(vaddr);
+		} else {
+			op(page_address(page) + offset, len);
+		}
+
+		left -= len;
+		offset = 0;
+		page = nth_page(page, 1);
+	}
+}
+
+int ion_legacy_cache_op(struct dma_buf *dmabuf, unsigned int offset,
+			unsigned int length, unsigned int cmd)
+{
+	struct ion_buffer *buffer;
+	struct scatterlist *sg;
+	void (*op)(const void *start, size_t size);
+	size_t remaining = length;
+	size_t skip = offset;
+	int i;
+
+	if (!dmabuf || dmabuf->ops != &dma_buf_ops)
+		return -EINVAL;
+
+	buffer = dmabuf->priv;
+	if (!buffer || !buffer->sg_table)
+		return -EINVAL;
+	if (!ion_buffer_cached(buffer))
+		return 0;
+	if (!hlos_accessible_buffer(buffer))
+		return -EPERM;
+	if ((size_t)offset > buffer->size ||
+	    (size_t)length > buffer->size - offset)
+		return -EINVAL;
+
+	switch (cmd) {
+	case ION_IOC_CLEAN_CACHES:
+		op = __dma_clean_area;
+		break;
+	case ION_IOC_INV_CACHES:
+		op = __dma_inv_area;
+		break;
+	case ION_IOC_CLEAN_INV_CACHES:
+		op = __dma_flush_area;
+		break;
+	default:
+		return -ENOTTY;
+	}
+
+	for_each_sg(buffer->sg_table->sgl, sg,
+		    buffer->sg_table->nents, i) {
+		size_t len;
+		size_t sg_offset;
+
+		if (skip >= sg->length) {
+			skip -= sg->length;
+			continue;
+		}
+
+		sg_offset = sg->offset + skip;
+		len = min(remaining, sg->length - skip);
+		if (!sg_page(sg))
+			return -EINVAL;
+		ion_legacy_cache_page_range(sg_page(sg), sg_offset, len, op);
+
+		remaining -= len;
+		if (!remaining)
+			return 0;
+		skip = 0;
+	}
+
+	return -EINVAL;
+}
+#endif
 
 struct dma_buf *ion_alloc_dmabuf(size_t len, unsigned int heap_id_mask,
 				 unsigned int flags)

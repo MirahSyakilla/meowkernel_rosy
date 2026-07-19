@@ -4,6 +4,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/dma-buf.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
@@ -23,8 +24,54 @@ union ion_ioctl_arg {
 	struct ion_fd_data fd;
 	struct ion_old_allocation_data old_allocation;
 	struct ion_handle_data handle;
+	struct ion_custom_data custom;
 #endif
 };
+
+#ifdef CONFIG_ION_LEGACY
+static long ion_legacy_cache_ioctl(unsigned int cmd, unsigned long arg)
+{
+	struct ion_flush_data data;
+	struct dma_buf *dmabuf;
+	int fd;
+	int ret;
+
+	switch (cmd) {
+	case ION_IOC_CLEAN_CACHES:
+	case ION_IOC_INV_CACHES:
+	case ION_IOC_CLEAN_INV_CACHES:
+		break;
+	default:
+		return -ENOTTY;
+	}
+
+	if (copy_from_user(&data, (void __user *)arg, sizeof(data)))
+		return -EFAULT;
+
+	/* Legacy allocations expose their dma-buf fd as the handle. */
+	fd = data.handle > 0 ? data.handle : data.fd;
+	dmabuf = dma_buf_get(fd);
+	if (IS_ERR(dmabuf))
+		return PTR_ERR(dmabuf);
+
+	if ((size_t)data.offset > dmabuf->size ||
+	    (size_t)data.length > dmabuf->size - data.offset) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (!data.length) {
+		ret = 0;
+		goto out;
+	}
+
+	ret = ion_legacy_cache_op(dmabuf, data.offset, data.length, cmd);
+
+out:
+	dma_buf_put(dmabuf);
+	return ret;
+}
+#endif
 
 static int validate_ioctl_arg(unsigned int cmd, union ion_ioctl_arg *arg)
 {
@@ -48,6 +95,7 @@ static unsigned int ion_ioctl_dir(unsigned int cmd)
 	switch (cmd) {
 #ifdef CONFIG_ION_LEGACY
 	case ION_IOC_FREE:
+	case ION_IOC_CUSTOM:
 		return _IOC_WRITE;
 #endif
 	default:
@@ -162,6 +210,9 @@ long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case ION_IOC_IMPORT:
 		data.fd.handle = data.fd.fd;
 		break;
+	case ION_IOC_CUSTOM:
+		return ion_legacy_cache_ioctl(data.custom.cmd,
+					      data.custom.arg);
 #endif
 	default:
 		return -ENOTTY;

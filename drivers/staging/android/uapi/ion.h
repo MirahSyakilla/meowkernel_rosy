@@ -72,6 +72,16 @@ struct ion_allocation_data {
 	__u32 unused;
 };
 
+/**
+ * struct ion_custom_data - metadata for a legacy custom ioctl
+ * @cmd: custom ioctl command
+ * @arg: userspace pointer to the custom command data
+ */
+struct ion_custom_data {
+	__u32 cmd;
+	unsigned long arg;
+};
+
 #define MAX_HEAP_NAME			32
 
 /**
@@ -112,6 +122,10 @@ struct ion_heap_query {
  */
 #define ION_IOC_ALLOC		_IOWR(ION_IOC_MAGIC, 0, \
 				      struct ion_allocation_data)
+/**
+ * DOC: ION_IOC_CUSTOM - call a supported legacy custom ioctl
+ */
+#define ION_IOC_CUSTOM		_IOWR(ION_IOC_MAGIC, 6, struct ion_custom_data)
 /**
  * DOC: ION_IOC_HEAP_QUERY - information about available heaps
  *

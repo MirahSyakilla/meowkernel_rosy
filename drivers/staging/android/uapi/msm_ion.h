@@ -100,6 +100,29 @@ enum ion_heap_ids {
 
 #define ION_IOC_MSM_MAGIC 'M'
 
+/**
+ * struct ion_flush_data - legacy cache-maintenance request
+ * @handle: legacy handle; mapped to a dma-buf fd by CONFIG_ION_LEGACY
+ * @fd: dma-buf fd used by newer clients
+ * @vaddr: userspace mapping address retained for ABI compatibility
+ * @offset: byte offset into the buffer
+ * @length: number of bytes to maintain
+ */
+struct ion_flush_data {
+	__s32 handle;
+	__s32 fd;
+	void *vaddr;
+	__u32 offset;
+	__u32 length;
+};
+
+#define ION_IOC_CLEAN_CACHES		_IOWR(ION_IOC_MSM_MAGIC, 0, \
+					      struct ion_flush_data)
+#define ION_IOC_INV_CACHES		_IOWR(ION_IOC_MSM_MAGIC, 1, \
+					      struct ion_flush_data)
+#define ION_IOC_CLEAN_INV_CACHES	_IOWR(ION_IOC_MSM_MAGIC, 2, \
+					      struct ion_flush_data)
+
 struct ion_prefetch_regions {
 	__u64 sizes;
 	__u32 vmid;

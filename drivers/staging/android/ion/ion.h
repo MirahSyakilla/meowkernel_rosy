@@ -492,6 +492,10 @@ int ion_walk_heaps(int heap_id, enum ion_heap_type type, void *data,
 		   int (*f)(struct ion_heap *heap, void *data));
 
 long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+#ifdef CONFIG_ION_LEGACY
+int ion_legacy_cache_op(struct dma_buf *dmabuf, unsigned int offset,
+			unsigned int length, unsigned int cmd);
+#endif
 
 int ion_query_heaps(struct ion_heap_query *query);
 
