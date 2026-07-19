@@ -422,9 +422,11 @@ int is_ext_spk_gpio_support(struct platform_device *pdev,
 static int enable_spk_ext_pa(struct snd_soc_component *component, int enable)
 {
 	struct snd_soc_card *card = component->card;
-    struct msm_asoc_mach_data *pdata = snd_soc_card_get_drvdata(card);
-    int ret = 0;
+	struct msm_asoc_mach_data *pdata = snd_soc_card_get_drvdata(card);
+	int ret = 0;
+	#if IS_ENABLED(CONFIG_MACH_XIAOMI_MIDO)
 	int pa_mode = EXT_PA_MODE;
+	#endif
     int mach = xiaomi_msm8953_mach_get();
     int is_mido = (mach == XIAOMI_MSM8953_MACH_MIDO);
     int is_rosy = (mach == XIAOMI_MSM8953_MACH_ROSY);
@@ -443,14 +445,16 @@ static int enable_spk_ext_pa(struct snd_soc_component *component, int enable)
     if (enable) {
         if (is_rosy) {
             AW87319_Audio_Speaker();
-        } else if (is_mido) {
-            while (pa_mode > 0) {
+		} else if (is_mido) {
+	#if IS_ENABLED(CONFIG_MACH_XIAOMI_MIDO)
+			while (pa_mode > 0) {
                 gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, 0);
                 udelay(2);
                 gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, enable);
                 udelay(2);
-                pa_mode--;
-            }
+				pa_mode--;
+			}
+	#endif
         } else {
             ret = msm_cdc_pinctrl_select_active_state(pdata->spk_ext_pa_gpio_p);
             if (ret) {
