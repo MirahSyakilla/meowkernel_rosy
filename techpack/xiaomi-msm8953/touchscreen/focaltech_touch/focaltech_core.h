@@ -282,6 +282,9 @@ struct fts_ts_data {
 	int point_num;
 	struct regulator *vdd;
 	struct regulator *vcc_i2c;
+	struct regulator *panel_iovdd;
+	struct regulator *lab;
+	struct regulator *ibb;
 #if FTS_PINCTRL_EN
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *pins_active;

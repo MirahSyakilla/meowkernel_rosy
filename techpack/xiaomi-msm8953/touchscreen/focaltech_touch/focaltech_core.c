@@ -1405,7 +1405,7 @@ int fts_reset_proc(int hdelayms)
 {
 	FTS_DEBUG("tp reset");
 	gpio_direction_output(fts_data->pdata->reset_gpio, 0);
-	msleep(1);
+	msleep(20);
 	gpio_direction_output(fts_data->pdata->reset_gpio, 1);
 	if (hdelayms) {
 		msleep(hdelayms);
@@ -1896,7 +1896,13 @@ static int fts_read_touchdata(struct fts_ts_data *data)
 	u8 *buf = data->point_buf;
 
 	memset(buf, 0xFF, data->pnt_buf_size);
-	buf[0] = 0x01;
+	/*
+	 * Rosy's FT8716 4.9 driver reads the touch packet from register 0x00
+	 * directly into buf[0].  The newer common driver starts at 0x01 and
+	 * shifts the payload by one byte, which makes the legacy FT8716 packet
+	 * parser see garbage point counts.
+	 */
+	buf[0] = 0x00;
 
 	if (data->gesture_mode) {
 		if (0 == fts_gesture_readdata(data, NULL)) {
@@ -1905,7 +1911,7 @@ static int fts_read_touchdata(struct fts_ts_data *data)
 		}
 	}
 
-	ret = fts_read(buf, 1, buf + 1, data->pnt_buf_size - 1);
+	ret = fts_read(buf, 1, buf, FTS_TOUCH_DATA_LEN);
 	if (ret < 0) {
 		FTS_ERROR("read touchdata failed, ret:%d", ret);
 		return ret;
@@ -2382,6 +2388,54 @@ static int fts_power_source_ctrl(struct fts_ts_data *ts_data, int enable)
 	return ret;
 }
 
+static int fts_lcd_power_ctrl(struct fts_ts_data *ts_data, bool enable)
+{
+	int ret = 0;
+
+	FTS_FUNC_ENTER();
+	if (enable) {
+		if (!IS_ERR_OR_NULL(ts_data->panel_iovdd)) {
+			ret = regulator_enable(ts_data->panel_iovdd);
+			if (ret)
+				FTS_ERROR("enable panel_iovdd regulator failed,ret=%d", ret);
+		}
+
+		if (!IS_ERR_OR_NULL(ts_data->lab)) {
+			ret = regulator_enable(ts_data->lab);
+			if (ret)
+				FTS_ERROR("enable lab regulator failed,ret=%d", ret);
+		}
+
+		if (!IS_ERR_OR_NULL(ts_data->ibb)) {
+			ret = regulator_enable(ts_data->ibb);
+			if (ret)
+				FTS_ERROR("enable ibb regulator failed,ret=%d", ret);
+		}
+	} else {
+		if (!IS_ERR_OR_NULL(ts_data->lab)) {
+			ret = regulator_disable(ts_data->lab);
+			if (ret)
+				FTS_ERROR("disable lab regulator failed,ret=%d", ret);
+		}
+
+		if (!IS_ERR_OR_NULL(ts_data->ibb)) {
+			ret = regulator_disable(ts_data->ibb);
+			if (ret)
+				FTS_ERROR("disable ibb regulator failed,ret=%d", ret);
+		}
+
+		mdelay(10);
+		if (!IS_ERR_OR_NULL(ts_data->panel_iovdd)) {
+			ret = regulator_disable(ts_data->panel_iovdd);
+			if (ret)
+				FTS_ERROR("disable panel_iovdd regulator failed,ret=%d", ret);
+		}
+	}
+
+	FTS_FUNC_EXIT();
+	return ret;
+}
+
 /*****************************************************************************
 * Name: fts_power_source_init
 * Brief: Init regulator power:vdd/vcc_io(if have), generally, no vcc_io
@@ -2408,16 +2462,33 @@ static int fts_power_source_init(struct fts_ts_data *ts_data)
 	if (IS_ERR_OR_NULL(ts_data->vcc_i2c))
 		FTS_INFO("get vcc_i2c regulator failed");
 
+	ts_data->panel_iovdd = regulator_get_optional(ts_data->dev, "panel_iovdd");
+	if (IS_ERR_OR_NULL(ts_data->panel_iovdd))
+		FTS_INFO("get panel_iovdd regulator failed");
+
+	ts_data->lab = regulator_get_optional(ts_data->dev, "lab");
+	if (IS_ERR_OR_NULL(ts_data->lab))
+		FTS_INFO("get lab regulator failed");
+
+	ts_data->ibb = regulator_get_optional(ts_data->dev, "ibb");
+	if (IS_ERR_OR_NULL(ts_data->ibb))
+		FTS_INFO("get ibb regulator failed");
+
 #if FTS_PINCTRL_EN
 	fts_pinctrl_init(ts_data);
 	fts_pinctrl_select_normal(ts_data);
 #endif
 
 	ts_data->power_disabled = true;
-	ret = fts_power_source_ctrl(ts_data, ENABLE);
-	if (ret) {
-		FTS_ERROR("fail to enable power(regulator)");
+	if (!FTS_CHIP_IDC(ts_data->pdata->type)) {
+		ret = fts_power_source_ctrl(ts_data, ENABLE);
+		if (ret)
+			FTS_ERROR("fail to enable power(regulator)");
+	} else {
+		FTS_INFO("skip generic vdd/vcc_i2c regulator enable for incell touch");
 	}
+
+	fts_lcd_power_ctrl(ts_data, true);
 
 	FTS_FUNC_EXIT();
 	return ret;
@@ -2429,6 +2500,7 @@ static int fts_power_source_exit(struct fts_ts_data *ts_data)
 	fts_pinctrl_select_release(ts_data);
 #endif
 
+	fts_lcd_power_ctrl(ts_data, false);
 	fts_power_source_ctrl(ts_data, DISABLE);
 
 	if (!IS_ERR_OR_NULL(ts_data->vdd)) {
@@ -2442,6 +2514,13 @@ static int fts_power_source_exit(struct fts_ts_data *ts_data)
 			regulator_set_voltage(ts_data->vcc_i2c, 0, FTS_I2C_VTG_MAX_UV);
 		regulator_put(ts_data->vcc_i2c);
 	}
+
+	if (!IS_ERR_OR_NULL(ts_data->panel_iovdd))
+		regulator_put(ts_data->panel_iovdd);
+	if (!IS_ERR_OR_NULL(ts_data->lab))
+		regulator_put(ts_data->lab);
+	if (!IS_ERR_OR_NULL(ts_data->ibb))
+		regulator_put(ts_data->ibb);
 
 	return 0;
 }
@@ -3225,28 +3304,34 @@ static int fts_ts_remove_entry(struct fts_ts_data *ts_data)
 	return 0;
 }
 
-static bool ev_btn_status = false;
-static bool fts_ts_irq_active = false;
+#if defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) || \
+	defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE)
+static bool ev_btn_status;
+static bool fts_ts_irq_active;
 static void fts_ts_irq_handler(int irq, bool active)
 {
- 	if (active) {
- 		if (!fts_ts_irq_active) {
- 			enable_irq_wake(irq);
- 			fts_ts_irq_active = true;
- 		}
- 	} else {
- 		if (fts_ts_irq_active) {
- 			disable_irq_wake(irq);
- 			fts_ts_irq_active = false;
- 		}
- 	}
+	if (active) {
+		if (!fts_ts_irq_active) {
+			enable_irq_wake(irq);
+			fts_ts_irq_active = true;
+		}
+	} else {
+		if (fts_ts_irq_active) {
+			disable_irq_wake(irq);
+			fts_ts_irq_active = false;
+		}
+	}
 }
+#endif
 
 static int fts_ts_suspend(struct device *dev)
 {
 	int ret = 0;
 	struct fts_ts_data *ts_data = fts_data;
+	#if defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) || \
+		defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE)
 	int i = 0;
+	#endif
 
 	FTS_FUNC_ENTER();
 	if (ts_data->suspended) {
@@ -3259,7 +3344,9 @@ static int fts_ts_suspend(struct device *dev)
 		return 0;
 	}
 
-#if (defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) && !defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE))
+	#if defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) || \
+		defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE)
+	#if (defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) && !defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE))
 	if (dt2w_switch > 0 && !gesture_incall) {
 #elif (defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE) && !defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE))
 	if (s2w_switch == 1 && !gesture_incall) {
@@ -3281,6 +3368,7 @@ static int fts_ts_suspend(struct device *dev)
 		fts_ts_irq_handler(ts_data->client->irq, true);
 		return 0;
 	}
+	#endif
 
 #ifdef CONFIG_FTS_TRUSTED_TOUCH
 	if (atomic_read(&fts_data->trusted_touch_transition)
@@ -3305,12 +3393,12 @@ static int fts_ts_suspend(struct device *dev)
 	} else {
 		fts_irq_disable();
 
-		FTS_INFO("make TP enter into sleep mode");
-		ret = fts_write_reg(FTS_REG_POWER_MODE, FTS_REG_POWER_MODE_SLEEP);
-		if (ret < 0)
-			FTS_ERROR("set TP to sleep mode fail, ret=%d", ret);
-
 		if (!ts_data->ic_info.is_incell) {
+			FTS_INFO("make TP enter into sleep mode");
+			ret = fts_write_reg(FTS_REG_POWER_MODE, FTS_REG_POWER_MODE_SLEEP);
+			if (ret < 0)
+				FTS_ERROR("set TP to sleep mode fail, ret=%d", ret);
+
 #if FTS_POWER_SOURCE_CUST_EN
 			ret = fts_power_source_suspend(ts_data);
 			if (ret < 0) {
@@ -3318,10 +3406,15 @@ static int fts_ts_suspend(struct device *dev)
 			}
 #endif
 		} else {
-#if FTS_PINCTRL_EN
-			fts_pinctrl_select_suspend(ts_data);
-#endif
-			gpio_direction_output(ts_data->pdata->reset_gpio, 0);
+			/*
+			 * Rosy's working 4.9 FT8716 path leaves the touch GPIO muxing
+			 * and LCD rail sequencing alone here.  Switching reset/IRQ pins or
+			 * toggling panel rails from the touch suspend path leaves the
+			 * controller in a bad I2C state after blank/resume.  Trial94 also
+			 * showed that issuing the sleep command while leaving those rails
+			 * alone can strand I2C at -107, so keep in-cell FT8716 awake across
+			 * display blank.
+			 */
 		}
 	}
 
@@ -3343,7 +3436,9 @@ static int fts_ts_resume(struct device *dev)
 		return 0;
 	}
 
-#if (defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) && !defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE))
+	#if defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) || \
+		defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE)
+	#if (defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE) && !defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE))
 	if (dt2w_switch > 0) {
 #elif (defined(CONFIG_TOUCHSCREEN_SWEEP2WAKE) && !defined(CONFIG_TOUCHSCREEN_DOUBLETAP2WAKE))
 	if (s2w_switch == 1) {
@@ -3357,6 +3452,7 @@ static int fts_ts_resume(struct device *dev)
 		}
 		fts_ts_irq_handler(ts_data->client->irq, false);
 	}
+	#endif
 
 #ifdef CONFIG_FTS_TRUSTED_TOUCH
 
@@ -3385,16 +3481,16 @@ static int fts_ts_resume(struct device *dev)
 #if FTS_POWER_SOURCE_CUST_EN
 		fts_power_source_resume(ts_data);
 #endif
+
+		fts_reset_proc(200);
 	} else {
-#if FTS_PINCTRL_EN
-		fts_pinctrl_select_normal(ts_data);
-#endif
+		/*
+		 * Match the working 4.9 in-cell resume path: no generic reset,
+		 * pinctrl switch, or LCD rail toggle from the touch driver.
+		 */
 	}
 
-	fts_reset_proc(200);
-
-	fts_wait_tp_to_valid();
-	fts_ex_mode_recovery(ts_data);
+	fts_tp_state_recovery(ts_data);
 
 #if FTS_ESDCHECK_EN
 	fts_esdcheck_resume();
