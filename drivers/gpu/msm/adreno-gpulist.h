@@ -311,8 +311,14 @@ static const struct adreno_a5xx_core adreno_gpu_core_a505 = {
 static const struct adreno_a5xx_core adreno_gpu_core_a506 = {
 	.base = {
 		DEFINE_ADRENO_REV(ADRENO_REV_A506, 5, 0, 6, ANY_ID),
-		.features = ADRENO_PREEMPTION | ADRENO_64BIT |
-			ADRENO_CONTENT_PROTECTION | ADRENO_CPZ_RETENTION,
+		/*
+		 * Rosy/A506 currently reaches Android userspace but stalls in the
+		 * A5xx preemption retirement path. Keep preemption disabled for
+		 * this diagnostic so KGSL uses the single-ringbuffer path. Also
+		 * temporarily keep the A506 userspace aperture in the 32-bit range
+		 * to classify the Trial85 fault at KGSL_IOMMU_VA_BASE64 + 0x27000.
+		 */
+		.features = ADRENO_CONTENT_PROTECTION | ADRENO_CPZ_RETENTION,
 		.gpudev = &adreno_a5xx_gpudev,
 		.gmem_size = (SZ_128K + SZ_8K),
 		.busy_mask = 0xfffffffe,

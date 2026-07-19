@@ -223,7 +223,11 @@ int adreno_ringbuffer_submit_spin(struct adreno_ringbuffer *rb,
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	unsigned int *cmds;
 
-	/* GPUs which support APRIV feature doesn't require a WHERE_AM_I */
+	/*
+	 * GPUs which support APRIV don't require a WHERE_AM_I. Keep the A5xx
+	 * submit-spin WHERE_AM_I path: on rosy/A506, removing it makes the KGSL
+	 * driver-entry/CP-init path time out before EGL can initialize.
+	 */
 	if (ADRENO_FEATURE(adreno_dev, ADRENO_APRIV) ||
 			adreno_is_a3xx(adreno_dev))
 		return adreno_ringbuffer_submit_spin_nosync(rb, time, timeout);
@@ -367,8 +371,10 @@ int adreno_ringbuffer_probe(struct adreno_device *adreno_dev)
 	int status = -ENOMEM;
 
 	if (!adreno_is_a3xx(adreno_dev)) {
-		unsigned int priv =
-			KGSL_MEMDESC_RANDOM | KGSL_MEMDESC_PRIVILEGED;
+		unsigned int priv = KGSL_MEMDESC_RANDOM;
+
+		if (ADRENO_FEATURE(adreno_dev, ADRENO_APRIV))
+			priv |= KGSL_MEMDESC_PRIVILEGED;
 
 		status = kgsl_allocate_global(device, &device->scratch,
 				PAGE_SIZE, 0, priv, "scratch");
@@ -573,6 +579,12 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 		total_sizedwords += 10;
 	else if (!adreno_is_a3xx(adreno_dev) &&
 			!ADRENO_FEATURE(adreno_dev, ADRENO_APRIV))
+		/*
+		 * Trial87 showed rosy/A506 retiring some timestamps while the
+		 * KGSL scratch RPTR stayed pinned at the submit-spin value. The
+		 * working 4.9 path includes A5xx here, so restore WHERE_AM_I for
+		 * normal A5xx submissions.
+		 */
 		total_sizedwords += 3;
 
 	/*
@@ -586,8 +598,13 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 	total_sizedwords += 5; /* eop timestamp */
 
 	if (drawctxt && !is_internal_cmds(flags)) {
-		/* global timestamp with cache flush ts for non-zero context */
-		total_sizedwords += 5;
+		/*
+		 * Match the working rosy 4.9 A5xx path: the per-context EOP
+		 * below is the cache-flush timestamp, but the RB EOP mirror is
+		 * a plain CP_MEM_WRITE. Issuing a second CACHE_FLUSH_TS here
+		 * leaves A506 fences stuck with retired timestamps at zero.
+		 */
+		total_sizedwords += 4;
 	}
 
 	if (flags & KGSL_CMD_FLAGS_WFI)
@@ -748,11 +765,9 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 		*ringcmds++ = timestamp;
 
 		/* Write the end of pipeline timestamp to the ringbuffer too */
-		*ringcmds++ = cp_mem_packet(adreno_dev, CP_EVENT_WRITE, 3, 1);
-		*ringcmds++ = CACHE_FLUSH_TS;
-		ringcmds += cp_gpuaddr(adreno_dev, ringcmds,
-			MEMSTORE_RB_GPU_ADDR(device, rb, eoptimestamp));
-		*ringcmds++ = rb->timestamp;
+		ringcmds += cp_mem_write(adreno_dev, ringcmds,
+			MEMSTORE_RB_GPU_ADDR(device, rb, eoptimestamp),
+			rb->timestamp);
 	} else {
 		ringcmds += cp_gpuaddr(adreno_dev, ringcmds,
 			MEMSTORE_RB_GPU_ADDR(device, rb, eoptimestamp));
