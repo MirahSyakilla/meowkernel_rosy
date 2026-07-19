@@ -26,4 +26,6 @@
 	compatible = "qcom,sdm450-qrd", "qcom,sdm450", "qcom,qrd", "xiaomi,rosy";
 	qcom,board-id = <0x1000b 1>;
 	qcom,msm-id = <338 0x0>;
+	qcom,pmic-id = <0x10016 0x20040 0x0 0x0>;
+	qcom,pmic-name = "PMI8940";
 };

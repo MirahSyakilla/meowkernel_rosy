@@ -25,6 +25,10 @@
 
 &spmi_bus {
 	qcom,pmi8940@2 {
+		qcom,leds@a100 {
+			status = "disabled";
+		};
+
 		qpnp_smbcharger: qcom,qpnp-smbcharger {
 			qcom,battery-data = <&qrd_batterydata>;
 			qcom,float-voltage-mv = <4400>;
