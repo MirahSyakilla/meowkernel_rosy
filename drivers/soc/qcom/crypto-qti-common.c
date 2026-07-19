@@ -14,8 +14,21 @@
  */
 
 #include <linux/crypto-qti-common.h>
+#include <linux/bitops.h>
 #include "crypto-qti-ice-regs.h"
 #include "crypto-qti-platform.h"
+
+#define QTI_ICE_MIN_SUPPORTED_MAJOR_VERSION	0x02
+#define QTI_ICE_MAX_BYPASS_CHECK_COUNT		100
+#define QTI_ICE_BYPASS_CHECK_DELAY_US		50
+#define ICE_V2_CONTROL_GLOBAL_BYPASS		BIT(0)
+#define ICE_V2_BYPASS_STATUS_GLOBAL_BYPASS	BIT(31)
+
+static bool ice_is_v2(struct crypto_vops_qti_entry *ice_entry)
+{
+	return ((ice_entry->ice_hw_version & ICE_CORE_MAJOR_REV_MASK) >>
+		ICE_CORE_MAJOR_REV) == 2;
+}
 
 static int ice_check_fuse_setting(struct crypto_vops_qti_entry *ice_entry)
 {
@@ -52,7 +65,7 @@ static int ice_check_version(struct crypto_vops_qti_entry *ice_entry)
 	minor = (version & ICE_CORE_MINOR_REV_MASK) >> ICE_CORE_MINOR_REV;
 	step = (version & ICE_CORE_STEP_REV_MASK) >> ICE_CORE_STEP_REV;
 
-	if (major < ICE_CORE_CURRENT_MAJOR_VERSION) {
+	if (major < QTI_ICE_MIN_SUPPORTED_MAJOR_VERSION) {
 		pr_err("%s: Unknown ICE device at %lu, rev %d.%d.%d\n",
 			__func__, (unsigned long)ice_entry->icemmio_base,
 				major, minor, step);
@@ -115,6 +128,25 @@ static void ice_low_power_and_optimization_enable(
 	wmb();
 }
 
+/* ICE2 requires the low-power and optimization writes as two transactions. */
+static void ice_v2_low_power_and_optimization_enable(
+		struct crypto_vops_qti_entry *ice_entry)
+{
+	u32 regval;
+
+	regval = ice_readl(ice_entry, ICE_REGS_ADVANCED_CONTROL);
+	regval |= 0x7000;
+	ice_writel(ice_entry, regval, ICE_REGS_ADVANCED_CONTROL);
+	mb();
+
+	udelay(5);
+	regval = ice_readl(ice_entry, ICE_REGS_ADVANCED_CONTROL);
+	regval |= 0xD807100;
+	ice_writel(ice_entry, regval, ICE_REGS_ADVANCED_CONTROL);
+	mb();
+	udelay(5);
+}
+
 static int ice_wait_bist_status(struct crypto_vops_qti_entry *ice_entry)
 {
 	int count;
@@ -136,12 +168,51 @@ static int ice_wait_bist_status(struct crypto_vops_qti_entry *ice_entry)
 	return 0;
 }
 
+static int ice_v2_enable(struct crypto_vops_qti_entry *ice_entry)
+{
+	int count;
+	u32 bist;
+	u32 bypass;
+	u32 control;
+
+	/*
+	 * ICE2 comes out of reset in global bypass.  Match the legacy driver:
+	 * make controller reset affect ICE, then clear global bypass.
+	 */
+	ice_writel(ice_entry, 0, ICE_REGS_RESET);
+	mb();
+
+	control = ice_readl(ice_entry, ICE_REGS_CONTROL);
+	control &= ~ICE_V2_CONTROL_GLOBAL_BYPASS;
+	ice_writel(ice_entry, control, ICE_REGS_CONTROL);
+	mb();
+
+	for (count = 0; count < QTI_ICE_MAX_BYPASS_CHECK_COUNT; count++) {
+		bypass = ice_readl(ice_entry, ICE_REGS_BYPASS_STATUS);
+		if (!(bypass & ICE_V2_BYPASS_STATUS_GLOBAL_BYPASS))
+			break;
+		udelay(QTI_ICE_BYPASS_CHECK_DELAY_US);
+	}
+
+	bist = ice_readl(ice_entry, ICE_REGS_BIST_STATUS);
+	pr_info("%s: ICE2 control=0x%08x bypass=0x%08x bist=0x%08x polls=%d\n",
+		__func__, control, bypass, bist,
+		count == QTI_ICE_MAX_BYPASS_CHECK_COUNT ? count : count + 1);
+
+	/* The working 4.9 driver warns here but keeps ICE available. */
+	if (bypass & ICE_V2_BYPASS_STATUS_GLOBAL_BYPASS)
+		pr_warn("%s: ICE2 remains in global bypass; continuing for legacy compatibility\n",
+			__func__);
+
+	return 0;
+}
+
 static void ice_enable_intr(struct crypto_vops_qti_entry *ice_entry)
 {
 	uint32_t regval;
 
 	regval = ice_readl(ice_entry, ICE_REGS_NON_SEC_IRQ_MASK);
-	regval &= ~ICE_REGS_NON_SEC_IRQ_MASK;
+	regval &= ~ICE_NON_SEC_IRQ_MASK;
 	ice_writel(ice_entry, regval, ICE_REGS_NON_SEC_IRQ_MASK);
 	/*
 	 * Memory barrier - to ensure write completion before next transaction
@@ -154,7 +225,7 @@ static void ice_disable_intr(struct crypto_vops_qti_entry *ice_entry)
 	uint32_t regval;
 
 	regval = ice_readl(ice_entry, ICE_REGS_NON_SEC_IRQ_MASK);
-	regval |= ICE_REGS_NON_SEC_IRQ_MASK;
+	regval |= ICE_NON_SEC_IRQ_MASK;
 	ice_writel(ice_entry, regval, ICE_REGS_NON_SEC_IRQ_MASK);
 	/*
 	 * Memory barrier - to ensure write completion before next transaction
@@ -173,11 +244,30 @@ int crypto_qti_enable(void *priv_data)
 		return -EINVAL;
 	}
 
-	ice_low_power_and_optimization_enable(ice_entry);
+	if (ice_is_v2(ice_entry))
+		ice_v2_low_power_and_optimization_enable(ice_entry);
+	else
+		ice_low_power_and_optimization_enable(ice_entry);
+
 	err = ice_wait_bist_status(ice_entry);
 	if (err)
 		return err;
-	ice_enable_intr(ice_entry);
+
+	if (ice_is_v2(ice_entry)) {
+		err = ice_v2_enable(ice_entry);
+		if (err)
+			return err;
+	}
+
+	/*
+	 * Rosy gives the ICE2 register window exclusively to CQHCI, so the
+	 * standalone ICE IRQ handler is deliberately absent.  Keep its level
+	 * interrupt masked; CQHCI request failures still surface through SDHC.
+	 */
+	if (ice_is_v2(ice_entry))
+		ice_disable_intr(ice_entry);
+	else
+		ice_enable_intr(ice_entry);
 
 	return err;
 }
@@ -206,6 +296,9 @@ int crypto_qti_resume(void *priv_data)
 		pr_err("%s: vops ice data is invalid\n", __func__);
 		return -EINVAL;
 	}
+
+	if (ice_is_v2(ice_entry))
+		return crypto_qti_enable(priv_data);
 
 	err = ice_wait_bist_status(ice_entry);
 
