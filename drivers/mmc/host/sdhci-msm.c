@@ -5385,7 +5385,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	struct resource *tlmm_memres = NULL;
 	void __iomem *tlmm_mem;
 	unsigned long flags;
-	bool force_probe;
+	bool force_probe, legacy_ice_v2;
 
 	pr_debug("%s: Enter %s\n", dev_name(&pdev->dev), __func__);
 	msm_host = devm_kzalloc(&pdev->dev, sizeof(struct sdhci_msm_host),
@@ -5414,6 +5414,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	pltfm_host->priv = msm_host;
 	msm_host->mmc = host->mmc;
 	msm_host->pdev = pdev;
+	legacy_ice_v2 = sdhci_msm_has_legacy_ice_v2(host);
 
 	/* Extract platform data */
 	if (pdev->dev.of_node) {
@@ -5736,7 +5737,14 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	msm_host->mmc->caps2 |= msm_host->pdata->caps2;
 	msm_host->mmc->caps2 |= MMC_CAP2_BOOTPART_NOACC;
 	msm_host->mmc->caps2 |= MMC_CAP2_HS400_POST_TUNING;
-	msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
+	/*
+	 * Rosy's legacy ICE2 eMMC path is not yet equivalent to the working
+	 * 4.9 clock-scaling restore path.  Keep that host at its initialized
+	 * timing so userdata/fscrypt testing is not polluted by late bus-width
+	 * retests.
+	 */
+	if (!legacy_ice_v2)
+		msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
 	msm_host->mmc->caps2 |= MMC_CAP2_SANITIZE;
 	msm_host->mmc->caps2 |= MMC_CAP2_MAX_DISCARD_SIZE;
 	msm_host->mmc->caps2 |= MMC_CAP2_SLEEP_AWAKE;
