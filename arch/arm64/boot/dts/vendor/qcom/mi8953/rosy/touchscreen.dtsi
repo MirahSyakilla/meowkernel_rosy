@@ -1,8 +1,24 @@
 &focaltech_ts {
 	status = "okay";
 
-    focaltech,alternate-i2c-addr = <0x39>;
-	focaltech,display-coords = <0 0 720 1440>;
-	focaltech,ignore-id-check;
-	focaltech,charger-detect;
+	compatible = "focaltech,ft8716";
+	touchscreen-size-x = <720>;
+	touchscreen-size-y = <1440>;
+	interrupts = <65 0x2>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&ts_int_active &ts_reset_active>;
+	reset-gpios = <&tlmm 64 0x01>;
+	vcc-supply = <&pm8953_l10>;
+	iovcc-supply = <&pm8953_l5>;
+	panel_iovdd-supply = <&iovdd_gpio_vreg>;
+	lab-supply = <&lab_regulator>;
+	ibb-supply = <&ibb_regulator>;
+	/delete-property/ pinctrl-1;
+	/delete-property/ pinctrl-2;
+	/delete-property/ vcc_i2c-supply;
+	/delete-property/ focaltech,ic-type;
+	/delete-property/ focaltech,display-coords;
+	/delete-property/ focaltech,reset-gpio;
+	/delete-property/ focaltech,irq-gpio;
+	/delete-property/ focaltech,max-touch-number;
 };

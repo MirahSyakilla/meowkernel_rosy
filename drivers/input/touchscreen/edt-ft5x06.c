@@ -39,6 +39,11 @@
 #include <linux/input/mt.h>
 #include <linux/input/touchscreen.h>
 #include <linux/of_device.h>
+#include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
+#if defined(CONFIG_FB)
+#include <linux/fb.h>
+#endif
 
 #define WORK_REGISTER_THRESHOLD		0x00
 #define WORK_REGISTER_REPORT_RATE	0x08
@@ -68,6 +73,7 @@
 #define EDT_SWITCH_MODE_DELAY		5 /* msec */
 #define EDT_RAW_DATA_RETRIES		100
 #define EDT_RAW_DATA_DELAY		1000 /* usec */
+#define EDT_MAX_TOUCHES			10
 
 enum edt_ver {
 	EDT_M06,
@@ -94,6 +100,20 @@ struct edt_ft5x06_ts_data {
 
 	struct gpio_desc *reset_gpio;
 	struct gpio_desc *wake_gpio;
+	struct regulator *panel_iovdd;
+	struct regulator *lab;
+	struct regulator *ibb;
+	bool panel_iovdd_enabled;
+	bool lab_enabled;
+	bool ibb_enabled;
+	bool is_ft8716;
+	bool discard_first_frame;
+#if defined(CONFIG_FB)
+	struct notifier_block fb_notifier;
+	struct work_struct resume_work;
+	bool fb_registered;
+	bool display_suspended;
+#endif
 
 #if defined(CONFIG_DEBUG_FS)
 	struct dentry *debug_dir;
@@ -117,6 +137,14 @@ struct edt_ft5x06_ts_data {
 
 struct edt_i2c_chip_data {
 	int  max_support_points;
+	bool is_ft8716;
+};
+
+struct edt_ft5x06_touch {
+	u16 x;
+	u16 y;
+	u8 id;
+	bool down;
 };
 
 static int edt_ft5x06_ts_readwrite(struct i2c_client *client,
@@ -168,6 +196,94 @@ static bool edt_ft5x06_ts_check_crc(struct edt_ft5x06_ts_data *tsdata,
 	}
 
 	return true;
+}
+
+static void edt_ft5x06_release_all(struct edt_ft5x06_ts_data *tsdata)
+{
+	int i;
+
+	for (i = 0; i < tsdata->max_support_points; i++) {
+		input_mt_slot(tsdata->input, i);
+		input_mt_report_slot_state(tsdata->input, MT_TOOL_FINGER, false);
+	}
+
+	input_mt_report_pointer_emulation(tsdata->input, true);
+	input_sync(tsdata->input);
+}
+
+static void edt_ft8716_report_frame(struct edt_ft5x06_ts_data *tsdata,
+				    const u8 *rdbuf, int offset, int tplen)
+{
+	struct edt_ft5x06_touch touches[EDT_MAX_TOUCHES];
+	u16 seen_ids = 0;
+	int active_points = 0;
+	int num_touches = 0;
+	int i;
+
+	if (tsdata->discard_first_frame) {
+		tsdata->discard_first_frame = false;
+		edt_ft5x06_release_all(tsdata);
+		return;
+	}
+
+	if ((rdbuf[2] & 0x0f) > tsdata->max_support_points)
+		goto malformed;
+
+	for (i = 0; i < tsdata->max_support_points; i++) {
+		const u8 *buf = &rdbuf[i * tplen + offset];
+		int type = buf[0] >> 6;
+		int id = (buf[2] >> 4) & 0x0f;
+		int x;
+		int y;
+		bool down;
+
+		/* FT8716 terminates the report with contact ID 0xf. */
+		if (id == 0x0f)
+			break;
+		if (id >= tsdata->max_support_points)
+			goto malformed;
+		if (type == TOUCH_EVENT_RESERVED)
+			continue;
+		if (seen_ids & (1U << id))
+			goto malformed;
+
+		x = ((buf[0] << 8) | buf[1]) & 0x0fff;
+		y = ((buf[2] << 8) | buf[3]) & 0x0fff;
+		down = type != TOUCH_EVENT_UP;
+
+		if (down && (x > tsdata->prop.max_x || y > tsdata->prop.max_y))
+			goto malformed;
+
+		seen_ids |= 1U << id;
+		touches[num_touches].x = x;
+		touches[num_touches].y = y;
+		touches[num_touches].id = id;
+		touches[num_touches].down = down;
+		num_touches++;
+		if (down)
+			active_points++;
+	}
+
+	if (active_points != (rdbuf[2] & 0x0f))
+		goto malformed;
+
+	for (i = 0; i < num_touches; i++) {
+		input_mt_slot(tsdata->input, touches[i].id);
+		input_mt_report_slot_state(tsdata->input, MT_TOOL_FINGER,
+					   touches[i].down);
+		if (touches[i].down)
+			touchscreen_report_pos(tsdata->input, &tsdata->prop,
+					       touches[i].x, touches[i].y, true);
+	}
+
+	input_mt_report_pointer_emulation(tsdata->input, true);
+	input_sync(tsdata->input);
+	return;
+
+malformed:
+	dev_warn_ratelimited(&tsdata->client->dev,
+			     "discarding malformed FT8716 touch frame\n");
+	edt_ft5x06_release_all(tsdata);
 }
 
 static irqreturn_t edt_ft5x06_ts_isr(int irq, void *dev_id)
@@ -225,6 +341,11 @@ static irqreturn_t edt_ft5x06_ts_isr(int irq, void *dev_id)
 
 		if (!edt_ft5x06_ts_check_crc(tsdata, rdbuf, datalen))
 			goto out;
+	}
+
+	if (tsdata->is_ft8716) {
+		edt_ft8716_report_frame(tsdata, rdbuf, offset, tplen);
+		goto out;
 	}
 
 	for (i = 0; i < tsdata->max_support_points; i++) {
@@ -963,6 +1084,181 @@ edt_ft5x06_ts_set_regs(struct edt_ft5x06_ts_data *tsdata)
 	}
 }
 
+static void edt_ft8716_disable_panel_supplies(void *data)
+{
+	struct edt_ft5x06_ts_data *tsdata = data;
+	struct device *dev = &tsdata->client->dev;
+	bool bias_vote_present = false;
+	int error;
+
+	if (tsdata->lab_enabled) {
+		bias_vote_present = true;
+		error = regulator_disable(tsdata->lab);
+		if (error)
+			dev_warn(dev, "failed to disable LAB supply: %d\n", error);
+		else
+			tsdata->lab_enabled = false;
+	}
+
+	if (tsdata->ibb_enabled) {
+		bias_vote_present = true;
+		error = regulator_disable(tsdata->ibb);
+		if (error)
+			dev_warn(dev, "failed to disable IBB supply: %d\n", error);
+		else
+			tsdata->ibb_enabled = false;
+	}
+
+	if (bias_vote_present)
+		usleep_range(10000, 11000);
+
+	if (tsdata->panel_iovdd_enabled) {
+		error = regulator_disable(tsdata->panel_iovdd);
+		if (error)
+			dev_warn(dev,
+				 "failed to disable panel IOVDD supply: %d\n",
+				 error);
+		else
+			tsdata->panel_iovdd_enabled = false;
+	}
+}
+
+static int edt_ft8716_get_panel_supplies(struct edt_ft5x06_ts_data *tsdata)
+{
+	struct device *dev = &tsdata->client->dev;
+
+	tsdata->panel_iovdd = devm_regulator_get(dev, "panel_iovdd");
+	if (IS_ERR(tsdata->panel_iovdd))
+		return PTR_ERR(tsdata->panel_iovdd);
+
+	tsdata->lab = devm_regulator_get(dev, "lab");
+	if (IS_ERR(tsdata->lab))
+		return PTR_ERR(tsdata->lab);
+
+	tsdata->ibb = devm_regulator_get(dev, "ibb");
+	if (IS_ERR(tsdata->ibb))
+		return PTR_ERR(tsdata->ibb);
+
+	return 0;
+}
+
+static int edt_ft8716_enable_panel_supplies(struct edt_ft5x06_ts_data *tsdata)
+{
+	int error;
+
+	if (!tsdata->panel_iovdd_enabled) {
+		error = regulator_enable(tsdata->panel_iovdd);
+		if (error)
+			return error;
+		tsdata->panel_iovdd_enabled = true;
+	}
+
+	if (!tsdata->lab_enabled) {
+		error = regulator_enable(tsdata->lab);
+		if (error)
+			goto disable_supplies;
+		tsdata->lab_enabled = true;
+	}
+
+	if (!tsdata->ibb_enabled) {
+		error = regulator_enable(tsdata->ibb);
+		if (error)
+			goto disable_supplies;
+		tsdata->ibb_enabled = true;
+	}
+
+	return 0;
+
+disable_supplies:
+	edt_ft8716_disable_panel_supplies(tsdata);
+	return error;
+}
+
+#if defined(CONFIG_FB)
+static void edt_ft8716_resume_work(struct work_struct *work)
+{
+	struct edt_ft5x06_ts_data *tsdata =
+		container_of(work, struct edt_ft5x06_ts_data, resume_work);
+	struct device *dev = &tsdata->client->dev;
+	int error;
+
+	if (!tsdata->display_suspended)
+		return;
+
+	error = edt_ft8716_enable_panel_supplies(tsdata);
+	if (error) {
+		dev_err(dev, "failed to restore panel supplies: %d\n", error);
+		return;
+	}
+
+	if (tsdata->reset_gpio) {
+		usleep_range(5000, 6000);
+		gpiod_set_value_cansleep(tsdata->reset_gpio, 0);
+		msleep(300);
+	}
+
+	tsdata->discard_first_frame = true;
+	tsdata->display_suspended = false;
+	enable_irq(tsdata->client->irq);
+	dev_info(dev, "FT8716 display resume restored panel supply votes\n");
+}
+
+static void edt_ft8716_display_suspend(struct edt_ft5x06_ts_data *tsdata)
+{
+	if (tsdata->display_suspended)
+		return;
+
+	disable_irq(tsdata->client->irq);
+	edt_ft5x06_release_all(tsdata);
+
+	if (tsdata->reset_gpio) {
+		gpiod_set_value_cansleep(tsdata->reset_gpio, 1);
+		usleep_range(1000, 2000);
+	}
+
+	edt_ft8716_disable_panel_supplies(tsdata);
+	tsdata->display_suspended = true;
+
+	if (tsdata->panel_iovdd_enabled || tsdata->lab_enabled ||
+	    tsdata->ibb_enabled)
+		dev_warn(&tsdata->client->dev,
+			 "FT8716 display suspend left a panel supply vote enabled\n");
+	else
+		dev_info(&tsdata->client->dev,
+			 "FT8716 display suspend released panel supply votes\n");
+}
+
+static int edt_ft8716_fb_notifier(struct notifier_block *notifier,
+				  unsigned long event, void *data)
+{
+	struct edt_ft5x06_ts_data *tsdata = container_of(notifier,
+					struct edt_ft5x06_ts_data,
+					fb_notifier);
+	struct fb_event *evdata = data;
+	int blank;
+
+	if (!evdata || !evdata->data)
+		return NOTIFY_DONE;
+
+	blank = *(int *)evdata->data;
+
+	if (event == FB_EARLY_EVENT_BLANK &&
+	    (blank == FB_BLANK_POWERDOWN ||
+	     blank == FB_BLANK_VSYNC_SUSPEND)) {
+		cancel_work_sync(&tsdata->resume_work);
+		edt_ft8716_display_suspend(tsdata);
+	} else if (event == FB_EVENT_BLANK && blank == FB_BLANK_UNBLANK) {
+		schedule_work(&tsdata->resume_work);
+	} else if (event == FB_R_EARLY_EVENT_BLANK &&
+		   (blank == FB_BLANK_POWERDOWN ||
+		    blank == FB_BLANK_VSYNC_SUSPEND)) {
+		schedule_work(&tsdata->resume_work);
+	}
+
+	return NOTIFY_DONE;
+}
+#endif
+
 static int edt_ft5x06_ts_probe(struct i2c_client *client,
 					 const struct i2c_device_id *id)
 {
@@ -991,6 +1287,19 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 	}
 
 	tsdata->max_support_points = chip_data->max_support_points;
+	tsdata->client = client;
+	tsdata->is_ft8716 = chip_data->is_ft8716;
+	tsdata->discard_first_frame = tsdata->is_ft8716;
+
+	if (tsdata->is_ft8716) {
+		error = edt_ft8716_get_panel_supplies(tsdata);
+		if (error) {
+			if (error != -EPROBE_DEFER)
+				dev_err(&client->dev,
+					"failed to get panel supplies: %d\n", error);
+			return error;
+		}
+	}
 
 	tsdata->reset_gpio = devm_gpiod_get_optional(&client->dev,
 						     "reset", GPIOD_OUT_HIGH);
@@ -1008,6 +1317,21 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 		dev_err(&client->dev,
 			"Failed to request GPIO wake pin, error %d\n", error);
 		return error;
+	}
+
+	if (tsdata->is_ft8716) {
+		error = edt_ft8716_enable_panel_supplies(tsdata);
+		if (error) {
+			dev_err(&client->dev,
+				"failed to enable panel supplies: %d\n", error);
+			return error;
+		}
+
+		error = devm_add_action_or_reset(&client->dev,
+						 edt_ft8716_disable_panel_supplies,
+						 tsdata);
+		if (error)
+			return error;
 	}
 
 	if (tsdata->wake_gpio) {
@@ -1028,7 +1352,6 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 	}
 
 	mutex_init(&tsdata->mutex);
-	tsdata->client = client;
 	tsdata->input = input;
 	tsdata->factory_mode = false;
 
@@ -1103,6 +1426,21 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 	if (error)
 		return error;
 
+#if defined(CONFIG_FB)
+	if (tsdata->is_ft8716) {
+		INIT_WORK(&tsdata->resume_work, edt_ft8716_resume_work);
+		tsdata->fb_notifier.notifier_call = edt_ft8716_fb_notifier;
+		error = fb_register_client(&tsdata->fb_notifier);
+		if (error) {
+			dev_err(&client->dev,
+				"failed to register framebuffer notifier: %d\n",
+				error);
+			return error;
+		}
+		tsdata->fb_registered = true;
+	}
+#endif
+
 	edt_ft5x06_ts_prepare_debugfs(tsdata, dev_driver_string(&client->dev));
 	device_init_wakeup(&client->dev, 1);
 
@@ -1118,6 +1456,20 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client,
 static int edt_ft5x06_ts_remove(struct i2c_client *client)
 {
 	struct edt_ft5x06_ts_data *tsdata = i2c_get_clientdata(client);
+
+#if defined(CONFIG_FB)
+	if (tsdata->fb_registered) {
+		int error;
+
+		error = fb_unregister_client(&tsdata->fb_notifier);
+		if (error)
+			dev_warn(&client->dev,
+				 "failed to unregister framebuffer notifier: %d\n",
+				 error);
+		tsdata->fb_registered = false;
+		cancel_work_sync(&tsdata->resume_work);
+	}
+#endif
 
 	edt_ft5x06_ts_teardown_debugfs(tsdata);
 
@@ -1159,11 +1511,17 @@ static const struct edt_i2c_chip_data edt_ft6236_data = {
 	.max_support_points = 2,
 };
 
+static const struct edt_i2c_chip_data edt_ft8716_data = {
+	.max_support_points = 10,
+	.is_ft8716 = true,
+};
+
 static const struct i2c_device_id edt_ft5x06_ts_id[] = {
 	{ .name = "edt-ft5x06", .driver_data = (long)&edt_ft5x06_data },
 	{ .name = "edt-ft5506", .driver_data = (long)&edt_ft5506_data },
 	/* Note no edt- prefix for compatibility with the ft6236.c driver */
 	{ .name = "ft6236", .driver_data = (long)&edt_ft6236_data },
+	{ .name = "ft8716", .driver_data = (long)&edt_ft8716_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, edt_ft5x06_ts_id);
@@ -1176,6 +1534,7 @@ static const struct of_device_id edt_ft5x06_of_match[] = {
 	{ .compatible = "edt,edt-ft5506", .data = &edt_ft5506_data },
 	/* Note focaltech vendor prefix for compatibility with ft6236.c */
 	{ .compatible = "focaltech,ft6236", .data = &edt_ft6236_data },
+	{ .compatible = "focaltech,ft8716", .data = &edt_ft8716_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, edt_ft5x06_of_match);
