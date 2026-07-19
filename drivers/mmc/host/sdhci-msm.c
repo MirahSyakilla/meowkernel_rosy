@@ -4424,8 +4424,17 @@ void sdhci_msm_dump_vendor_regs(struct sdhci_host *host)
 		sdhci_msm_dump_fsm_history(host);
 		sdhci_msm_dump_desc_history(host);
 	}
-	/* Debug feature enable not must for iib */
-	sdhci_msm_dump_iib(host);
+	/*
+	 * Rosy's MSM8953 legacy layout matches the 4.9 driver and does not
+	 * expose the newer high-offset IIB history window safely through the
+	 * inherited hc/core mappings. Keep the richer IIB dump only on the
+	 * newer MCI-removed layout that introduced those offsets.
+	 */
+	if (msm_host->mci_removed)
+		sdhci_msm_dump_iib(host);
+	else
+		pr_info("%s: skipping legacy-layout IIB history dump\n",
+			mmc_hostname(host->mmc));
 
 	/*
 	 * tbsel indicates [2:0] bits and tbsel2 indicates [7:4] bits
