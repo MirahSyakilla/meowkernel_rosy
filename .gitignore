@@ -62,6 +62,7 @@ modules.builtin
 /ongoing.md
 /commit_list.md
 /trial_list.md
+/KernelSU-Next
 
 #
 # RPM spec file (make rpm-pkg)
